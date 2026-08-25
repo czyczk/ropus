@@ -1337,8 +1337,14 @@ fn silk_plc_conceal(dec: &mut SilkDecoderState, frame: &mut [i16]) {
                 }
             }
 
-            // Combine: LTP_pred + rand_noise * rand_scale
-            let exc = shl32(ltp_pred, 2) + ((rand_val as i64 * rand_scale_q14 as i64 >> 14) as i32);
+            // Combine: silk_LSHIFT32(silk_SMLAWB(LTP_pred, rand, rand_scale), 2).
+            // C divides the product by 2^16 first and then shifts by 2; doing
+            // a single >> 14 would keep the low two bits of the remainder and
+            // diverge by a few LSBs from the reference PLC path.
+            let smlawb = ltp_pred.wrapping_add(
+                ((rand_val as i64 * rand_scale_q14 as i64) >> 16) as i32,
+            );
+            let exc = smlawb.wrapping_shl(2);
 
             if frame_offset + i < s_ltp_q14.len() {
                 s_ltp_q14[frame_offset + i] = exc;
@@ -1402,41 +1408,34 @@ fn silk_plc_glue_frames(dec: &mut SilkDecoderState, frame: &mut [i16], length: u
         let (new_energy, new_shift) = silk_sum_sqr_shift(&frame[..length]);
 
         if new_energy > 0 && dec.s_plc.conc_energy > 0 {
-            // Normalize energies to same shift
-            let shift_diff = dec.s_plc.conc_energy_shift - new_shift;
-            let conc_e = if shift_diff > 0 {
-                dec.s_plc.conc_energy >> shift_diff
-            } else {
-                dec.s_plc.conc_energy << (-shift_diff)
-            };
+            // Normalize energies to same shift (C PLC.c:450-456).
+            let mut conc_energy = dec.s_plc.conc_energy;
+            let mut energy = new_energy;
+            if new_shift > dec.s_plc.conc_energy_shift {
+                conc_energy >>= new_shift - dec.s_plc.conc_energy_shift;
+            } else if new_shift < dec.s_plc.conc_energy_shift {
+                energy >>= dec.s_plc.conc_energy_shift - new_shift;
+            }
 
-            if conc_e < new_energy {
-                // New frame louder than concealment: fade in.
-                // C: `silk_PLC_glue_frames` (reference/silk/PLC.c:477-479) —
-                // when DEEP_PLC is enabled AND the internal SILK rate is 16 kHz
-                // the fade-in loop is SKIPPED (the neural PLC already produces
-                // a continuous signal, so energy-mismatch smoothing would just
-                // attenuate the first good frame for no benefit). We must
-                // mirror that here or we apply a 2x-plus amplitude squash to
-                // the first good frame every time the conc_energy is much
-                // smaller than the new energy, which blows through tier-2 SNR.
-                //
-                // In Rust, DEEP_PLC is always enabled (no compile-time gate)
-                // so the C co-condition `#ifdef ENABLE_DEEP_PLC` is implicitly
-                // satisfied; we only need to test `fs_khz != 16`.
-                let compute_gain = dec.s_plc.fs_khz != 16;
-                if compute_gain {
-                    let gain_q16 =
-                        silk_sqrt_approx(((conc_e as i64) << 16) as i32 / imax(new_energy, 1));
-                    let mut slope_q16 =
-                        ((65536 - gain_q16) as i64 / imax(length as i32, 1) as i64) as i32;
-                    slope_q16 = shl32(slope_q16, 2); // 4x steeper
+            // Fade in the energy difference, using the C reference's Q24
+            // normalization so the first good frame after DTX is bit-exact.
+            if energy > conc_energy {
+                let lz = silk_clz32(conc_energy) - 1;
+                conc_energy = silk_lshift(conc_energy, lz);
+                energy = silk_rshift(energy, imax(24 - lz, 0));
 
-                    let mut cur_gain_q16 = gain_q16;
-                    for i in 0..length {
-                        frame[i] = ((frame[i] as i32 * cur_gain_q16) >> 16) as i16;
-                        cur_gain_q16 += slope_q16;
-                        cur_gain_q16 = imin(cur_gain_q16, 65536);
+                let frac_q24 = conc_energy / imax(energy, 1);
+                let mut gain_q16 = silk_lshift(silk_sqrt_approx(frac_q24), 4);
+                let slope_q16 = silk_lshift(
+                    silk_div32_16((1 << 16) - gain_q16, length as i32),
+                    2,
+                );
+
+                for s in frame[..length].iter_mut() {
+                    *s = silk_smulwb_i32(gain_q16, *s as i32) as i16;
+                    gain_q16 += slope_q16;
+                    if gain_q16 > 1 << 16 {
+                        break;
                     }
                 }
             }

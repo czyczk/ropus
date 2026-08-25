@@ -19,10 +19,10 @@ only bitstreams are committed.
 
 ## Current results (f32 raw, `scripts/verify-corpus.py`)
 
-- **18 of 19 cases are bit-exact against `fixed16`** (every decoded f32 sample
+- **19 of 19 cases are bit-exact against `fixed16`** (every decoded f32 sample
   bit-identical, including SILK, hybrid, DTX transitions, and all CELT cases).
 - **s16 and s24 outputs are also bit-exact against `opus_demo -16` / `-24` for
-  all 18 non-DTX cases** (the s16 path follows the reference decode24→s16
+  all 19 cases** (the s16 path follows the reference decode24→s16
   conversion, including its -32768→-32767 saturation behavior).
 - **SILK cases are also bit-exact against `prod`** (0 bit differences).
 - **CELT/hybrid cases differ from `prod`** because the fixed-point Rust core
@@ -31,15 +31,20 @@ only bitstreams are committed.
   deltas are stored in `.refbuild/validation-report.json` after each run. This
   is the expected fixed-vs-float precision floor, not a CELT algorithm bug.
 
-## Known open item: DTX comfort-noise tail
+## DTX comfort-noise tail: resolved
 
-`speech-silk-012k-dtx-20ms` has **565 differing f32 samples out of 960,960**
-vs `fixed16` (max abs `1.07e-3`; s16 max delta 35 LSB), localized to 6 DTX
-comfort-noise frames around packets 87, 264, 422, 512, 751, 752. Every
-non-DTX frame in the same stream is bit-exact. Root cause is an internal
-SILK CNG state drift in the adopted ropus base; it is isolated, bounded, and
-under investigation before the final review. This is the one case that blocks
-the full bit-exact claim.
+The adopted ropus base had a SILK PLC/DTX drift that produced 565 differing
+f32 samples in `speech-silk-012k-dtx-20ms`. Root causes found and fixed:
+
+1. `silk_plc_conceal` combined `LTP_pred` and random excitation with a single
+   `>> 14` instead of C's `silk_SMLAWB(...) >> 16` followed by `<< 2`, keeping
+   low remainder bits that C discards.
+2. `silk_plc_glue_frames` used a simplified energy normalization instead of
+   C's CLZ-based Q24 normalization, and skipped the fade-in loop at 16 kHz as
+   if `ENABLE_DEEP_PLC` were defined (this repository builds without it).
+
+After the fixes all **19/19 corpus cases are bit-exact against `fixed16`** on
+f32, and s16/s24 are bit-exact against `opus_demo -16`/`-24` for every case.
 
 ## Reproduce
 
