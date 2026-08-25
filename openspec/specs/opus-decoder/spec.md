@@ -82,7 +82,7 @@ The decoder SHALL implement RFC 6716 packet loss concealment and decode in-band 
 
 ### Requirement: No machine-learning concealment paths
 
-The implementation SHALL NOT contain or call DNN/deep-PLC/DRED code paths, and the reference build used for comparison SHALL be configured with those paths disabled.
+The default decoder build SHALL NOT compile, link, or execute DNN/deep-PLC/DRED code paths; an opt-in `ml` cargo feature MAY retain the upstream port for source-comparison purposes, and the reference build used for comparison SHALL be configured with those paths disabled.
 
 #### Scenario: Reference and Rust builds exclude ML paths
 
