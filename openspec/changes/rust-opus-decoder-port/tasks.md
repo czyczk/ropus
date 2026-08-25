@@ -37,7 +37,7 @@
 - [x] 5.3 Validate s16 outputs byte-identical to the reference integer path for every corpus case and s24 outputs against the documented conversion rule
 - [x] 5.4 Run the CLI's six output combinations across the corpus and verify WAV headers, raw lengths, and exit codes
 - [x] 5.5 Produce and commit the validation report (case table, bit differences, build flags) and verify it is reproducible from a clean checkout
-- [ ] 5.6 Stop at the user listening checkpoint and verify the built CLI plus reference decoder are available for audition
+- [x] 5.6 Stop at the user listening checkpoint and verify the built CLI plus reference decoder are available for audition
 
 ## 6. Code Quality Review
 
