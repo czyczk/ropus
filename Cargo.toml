@@ -1,0 +1,3 @@
+[workspace]
+resolver = "3"
+members = ["crates/opus-core", "crates/opus-decoder", "crates/opus-decoder-cli"]

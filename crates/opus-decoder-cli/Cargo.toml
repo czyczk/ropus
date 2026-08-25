@@ -1,0 +1,16 @@
+[package]
+name = "opus-decoder-cli"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Command-line single-stream Opus decoder with WAV/raw PCM output."
+license = "BSD-3-Clause"
+
+[[bin]]
+name = "ropusdec"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+opus-decoder = { path = "../opus-decoder" }

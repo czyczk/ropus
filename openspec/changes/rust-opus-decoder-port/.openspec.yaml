@@ -1,0 +1,5 @@
+schema: spec-driven
+created: 2026-08-25
+goal: Deliver a bit-exact-on-f32 single-stream Opus decoder with
+  core/decoder/CLI crates, self-contained test corpus, and cross-platform SIMD
+  feature

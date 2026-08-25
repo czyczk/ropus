@@ -1,0 +1,15 @@
+[package]
+name = "opus-decoder"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Single-stream Opus decoder library (RFC 6716) built on the opus-core Rust codec core."
+license = "BSD-3-Clause"
+
+[dependencies]
+opus-core = { path = "../opus-core" }
+thiserror = "2"
+
+[features]
+default = ["simd"]
+simd = []
