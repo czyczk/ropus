@@ -161,7 +161,7 @@ impl Decoder {
 
     fn frame_size_from_output(&self, interleaved_len: usize) -> Result<i32, Error> {
         let nch = self.channels.count();
-        if nch == 0 || interleaved_len % nch != 0 {
+        if nch == 0 || !interleaved_len.is_multiple_of(nch) {
             return Err(Error::BadArgument);
         }
         let per_channel = interleaved_len / nch;
@@ -226,7 +226,10 @@ mod tests {
     fn buffer_length_must_match_channel_count() {
         let mut dec = Decoder::new(48000, Channels::Stereo).unwrap();
         let mut odd = [0i16; 3];
-        assert_eq!(dec.decode(None, &mut odd, DecodeMode::Normal), Err(Error::BadArgument));
+        assert_eq!(
+            dec.decode(None, &mut odd, DecodeMode::Normal),
+            Err(Error::BadArgument)
+        );
     }
 
     #[test]

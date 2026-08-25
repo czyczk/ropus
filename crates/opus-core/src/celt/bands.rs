@@ -259,6 +259,7 @@ pub fn denormalise_bands(
         };
 
         let band_len = (band_end - j_start) as usize;
+        #[cfg(feature = "simd")]
         super::simd::denormalise_band_simd(
             &x[x_idx..x_idx + band_len],
             &mut freq[f_idx..f_idx + band_len],
@@ -266,6 +267,14 @@ pub fn denormalise_bands(
             g,
             shift,
         );
+        #[cfg(not(feature = "simd"))]
+        {
+            use crate::types::{NORM_SHIFT, mult32_32_q31, pshr32, shl32};
+            let pre_shift = 30 - NORM_SHIFT;
+            for k in 0..band_len {
+                freq[f_idx + k] = pshr32(mult32_32_q31(shl32(x[x_idx + k], pre_shift), g), shift);
+            }
+        }
         x_idx += band_len;
         f_idx += band_len;
     }

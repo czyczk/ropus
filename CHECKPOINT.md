@@ -32,10 +32,10 @@ Binary used: `target/release/ropusdec` (also `target/debug/ropusdec`).
 - CELT/hybrid vs default float reference differ because the adopted core is
   the fixed-point 16-bit port while `./configure` default is the 24-bit float
   path. Max deltas per case are recorded in `.refbuild/validation-report.json`.
-- One known open item: the DTX case differs on 565/960,960 f32 samples
-  (max 1.07e-3), isolated to 6 comfort-noise frames. Root cause: the adopted
-  ropus base's documented SILK DTX-concealment drift (upstream does not gate
-  DTX concealment on byte-exactness). See `VALIDATION.md`.
+- The DTX case initially differed on 565/960,960 f32 samples; this was
+  root-caused to two PLC porting bugs (excitation shift and glue-frame
+  normalization) and fixed. All 19/19 cases are now bit-exact. See
+  `VALIDATION.md`.
 
 ## Reproduce
 

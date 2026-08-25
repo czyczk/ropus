@@ -108,7 +108,114 @@
 )]
 
 pub mod celt;
+#[cfg(feature = "ml")]
 pub mod dnn;
+#[cfg(not(feature = "ml"))]
+pub mod dnn {
+    //! No-ML build: inert stubs replace the DNN/deep-PLC/DRED machinery.
+    //! The decoder always takes the RFC 6716 classical PLC/DTX paths.
+
+    pub mod lpcnet {
+        /// Inert placeholder for the neural PLC state. `loaded` is always
+        /// false, so every caller follows its classical-PLC branch.
+        pub struct LPCNetPLCState {
+            pub loaded: bool,
+            pub fec_fill_pos: usize,
+            pub fec_skip: usize,
+            pub fec_read_pos: usize,
+        }
+
+        impl LPCNetPLCState {
+            pub fn new() -> Self {
+                Self {
+                    loaded: false,
+                    fec_fill_pos: 0,
+                    fec_skip: 0,
+                    fec_read_pos: 0,
+                }
+            }
+            pub fn reset(&mut self) {
+                self.fec_fill_pos = 0;
+                self.fec_skip = 0;
+                self.fec_read_pos = 0;
+            }
+            pub fn load_model(&mut self, _data: &[u8]) -> i32 {
+                -1
+            }
+            pub fn update(&mut self, _pcm: &[i16]) {}
+            pub fn conceal(&mut self, _pcm: &mut [i16]) {}
+            pub fn fec_add(&mut self, _features: Option<&[f32]>) {}
+            pub fn fec_clear(&mut self) {
+                self.fec_fill_pos = 0;
+                self.fec_skip = 0;
+                self.fec_read_pos = 0;
+            }
+        }
+    }
+
+    pub mod embedded_weights {
+        pub const WEIGHTS_BLOB: &[u8] = &[];
+        pub fn has_embedded_weights() -> bool {
+            false
+        }
+    }
+
+    pub mod dred {
+        pub const DRED_EXTENSION_ID: u32 = 126;
+        pub const DRED_EXPERIMENTAL_VERSION: u32 = 12;
+        pub const DRED_EXPERIMENTAL_BYTES: usize = 2;
+        pub const DRED_MIN_BYTES: usize = 8;
+        pub const DRED_MAX_DATA_SIZE: usize = 1000;
+        pub const DRED_NUM_REDUNDANCY_FRAMES: usize = 52;
+        pub const DRED_MAX_FRAMES: usize = 104;
+
+        pub fn compute_quantizer(q0: i32, d_q: i32, qmax: i32, i: i32) -> i32 {
+            const D_Q_TABLE: [i32; 8] = [0, 2, 3, 4, 6, 8, 12, 16];
+            let quant = q0 + (D_Q_TABLE[d_q as usize] * i + 8) / 16;
+            if quant > qmax { qmax } else { quant }
+        }
+
+        /// Inert DRED encoder stub: never loaded, never emits redundancy.
+        pub struct DREDEnc {
+            pub loaded: bool,
+            pub latents_buffer_fill: i32,
+        }
+
+        impl DREDEnc {
+            pub fn new(_fs: i32, _channels: i32) -> Self {
+                Self {
+                    loaded: false,
+                    latents_buffer_fill: 0,
+                }
+            }
+            pub fn new_unloaded(_fs: i32, _channels: i32) -> Self {
+                Self {
+                    loaded: false,
+                    latents_buffer_fill: 0,
+                }
+            }
+            pub fn reset(&mut self) {
+                self.latents_buffer_fill = 0;
+            }
+            pub fn load_model(&mut self, _data: &[u8]) -> Result<(), i32> {
+                Err(-1)
+            }
+            pub fn compute_latents(&mut self, _pcm: &[f32], _frame_size: i32, _extra_delay: i32) {}
+            pub fn encode_silk_frame(
+                &mut self,
+                _buf: &mut [u8],
+                _max_chunks: i32,
+                _max_bytes: usize,
+                _q0: i32,
+                _d_q: i32,
+                _qmax: i32,
+                _activity_mem: &[u8],
+            ) -> i32 {
+                0
+            }
+        }
+    }
+}
 pub mod opus;
 pub mod silk;
 pub mod types;

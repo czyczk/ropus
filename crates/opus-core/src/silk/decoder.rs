@@ -1341,9 +1341,8 @@ fn silk_plc_conceal(dec: &mut SilkDecoderState, frame: &mut [i16]) {
             // C divides the product by 2^16 first and then shifts by 2; doing
             // a single >> 14 would keep the low two bits of the remainder and
             // diverge by a few LSBs from the reference PLC path.
-            let smlawb = ltp_pred.wrapping_add(
-                ((rand_val as i64 * rand_scale_q14 as i64) >> 16) as i32,
-            );
+            let smlawb =
+                ltp_pred.wrapping_add(((rand_val as i64 * rand_scale_q14 as i64) >> 16) as i32);
             let exc = smlawb.wrapping_shl(2);
 
             if frame_offset + i < s_ltp_q14.len() {
@@ -1426,10 +1425,7 @@ fn silk_plc_glue_frames(dec: &mut SilkDecoderState, frame: &mut [i16], length: u
 
                 let frac_q24 = conc_energy / imax(energy, 1);
                 let mut gain_q16 = silk_lshift(silk_sqrt_approx(frac_q24), 4);
-                let slope_q16 = silk_lshift(
-                    silk_div32_16((1 << 16) - gain_q16, length as i32),
-                    2,
-                );
+                let slope_q16 = silk_lshift(silk_div32_16((1 << 16) - gain_q16, length as i32), 2);
 
                 for s in frame[..length].iter_mut() {
                     *s = silk_smulwb_i32(gain_q16, *s as i32) as i16;

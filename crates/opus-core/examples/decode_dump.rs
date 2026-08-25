@@ -50,5 +50,8 @@ fn main() {
         out.write_all(&f32buf).unwrap();
         total += bytes as u64;
     }
-    eprintln!("decoded {} samples/channel total", total / args[2].parse::<u64>().unwrap());
+    eprintln!(
+        "decoded {} samples/channel total",
+        total / args[2].parse::<u64>().unwrap()
+    );
 }

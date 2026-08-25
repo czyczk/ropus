@@ -269,8 +269,22 @@ pub fn clt_mdct_backward(
     }
 
     // ---- Mirror on both sides for TDAC (windowed overlap-add) ----
+    #[cfg(feature = "simd")]
     {
         super::simd::mdct_window_simd(output, window, overlap);
+    }
+    #[cfg(not(feature = "simd"))]
+    {
+        for yp in 0..overlap / 2 {
+            let xp = overlap - 1 - yp;
+            let w_asc = window[yp] as i32;
+            let w_desc = window[xp] as i32;
+            let x_fwd = output[xp];
+            let x_rev = output[yp];
+            let s_mul = |a: i32, b: i32| ((b as i16 as i64) * (a as i64) >> 15) as i32;
+            output[yp] = s_mul(x_rev, w_desc).wrapping_sub(s_mul(x_fwd, w_asc));
+            output[xp] = s_mul(x_rev, w_asc).wrapping_add(s_mul(x_fwd, w_desc));
+        }
     }
 }
 

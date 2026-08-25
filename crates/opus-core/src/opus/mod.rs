@@ -1,6 +1,7 @@
 #[doc(hidden)]
 pub mod analysis;
 pub mod decoder;
+#[cfg(feature = "ml")]
 pub mod dred;
 pub mod encoder;
 pub mod extensions;

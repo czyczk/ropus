@@ -1630,6 +1630,7 @@ impl OpusDecoder {
     /// (`FRAME_PLC_PERIODIC`, `FRAME_PLC_NOISE`, `FRAME_PLC_NEURAL`,
     /// `FRAME_DRED`) actually executed on the most recent decode.
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn celt_last_frame_type(&self) -> i32 {
         self.celt_dec.last_frame_type
     }
@@ -2152,6 +2153,7 @@ mod tests {
         assert_eq!(dec.frame_size, 120);
     }
 
+    #[cfg(feature = "ml")]
     #[test]
     fn test_ms_reset_clears_neural_plc_history() {
         let mut dec = OpusDecoder::new(48000, 1).unwrap();
@@ -3206,6 +3208,7 @@ mod tests {
     /// `set_dnn_blob` call can wipe it, because `load_model` clears
     /// layers as it re-initialises — the test accounts for both
     /// starting states by reloading a valid blob at the end.
+    #[cfg(feature = "ml")]
     #[test]
     fn test_decoder_ctl_set_dnn_blob_loads_real_blob() {
         let mut dec = OpusDecoder::new(48000, 1).unwrap();
@@ -3233,6 +3236,7 @@ mod tests {
     /// previously set). Prevents a silent half-populated state where
     /// e.g. PitchDNN weights from the new blob coexist with stale
     /// FARGAN weights from a prior call.
+    #[cfg(feature = "ml")]
     #[test]
     fn test_decoder_set_dnn_blob_rejects_partial_blob() {
         let mut dec = OpusDecoder::new(48000, 1).unwrap();
@@ -3258,6 +3262,7 @@ mod tests {
     /// means either the weights tarball was rev'd or the generator
     /// logic drifted, both of which warrant explicit review before
     /// shipping.
+    #[cfg(feature = "ml")]
     #[test]
     fn test_decoder_neural_plc_activates_with_default_weights() {
         // Golden-size assertion on the embedded blob. Catches silent
@@ -3309,6 +3314,7 @@ mod tests {
     /// caller explicitly swaps them back. Previous behaviour that
     /// re-loaded the embedded blob on every reset was a deviation from
     /// the C ABI; this test locks in the fix.
+    #[cfg(feature = "ml")]
     #[test]
     fn test_decoder_reset_preserves_weights() {
         let mut dec = OpusDecoder::new(48000, 1).unwrap();
@@ -3347,6 +3353,7 @@ mod tests {
     /// otherwise the synthetic zero-weight blob produces silence by
     /// construction and there's no bound that distinguishes correct
     /// from broken. Stage 7b.2 adds cross-reference parity checks.
+    #[cfg(feature = "ml")]
     #[test]
     fn test_decoder_neural_plc_branch_runs_under_loss() {
         use crate::opus::encoder::{OPUS_APPLICATION_AUDIO, OpusEncoder};
@@ -3432,6 +3439,7 @@ mod tests {
     /// encode/decode round-trip must still succeed and produce non-silent
     /// output. Ensures wiring the neural path through the decoder didn't
     /// regress the classical code path.
+    #[cfg(feature = "ml")]
     #[test]
     fn test_decoder_lossless_roundtrip_after_dnn_blob_loaded() {
         use crate::opus::encoder::{OPUS_APPLICATION_VOIP, OpusEncoder};
@@ -3469,6 +3477,7 @@ mod tests {
     /// Covers both SILK-only (16 kHz, where the SILK PLC gating lives)
     /// and CELT-only (48 kHz, where the `FRAME_PLC_NEURAL` gating lives)
     /// so that a regression in either branch shows up as a panic in CI.
+    #[cfg(feature = "ml")]
     #[test]
     fn test_decoder_does_not_panic_under_loss() {
         use crate::opus::encoder::{OPUS_APPLICATION_AUDIO, OPUS_APPLICATION_VOIP, OpusEncoder};

@@ -528,7 +528,24 @@ pub(crate) fn celt_maxabs32_scalar(x: &[i32]) -> i32 {
 
 /// Find maximum absolute value in a slice of 32-bit values.
 pub fn celt_maxabs32(x: &[i32]) -> i32 {
-    super::simd::celt_maxabs32_simd(x)
+    #[cfg(feature = "simd")]
+    {
+        super::simd::celt_maxabs32_simd(x)
+    }
+    #[cfg(not(feature = "simd"))]
+    {
+        let mut maxval = 0i32;
+        let mut minval = 0i32;
+        for &v in x {
+            if v > maxval {
+                maxval = v;
+            }
+            if v < minval {
+                minval = v;
+            }
+        }
+        return if maxval > -minval { maxval } else { -minval };
+    }
 }
 
 // ===========================================================================

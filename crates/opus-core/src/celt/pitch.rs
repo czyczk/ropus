@@ -122,7 +122,23 @@ pub(crate) fn xcorr_kernel_scalar(x: &[i32], y: &[i32], sum: &mut [i32; 4], len:
 /// Dispatches to a SIMD implementation using `wide::i32x4`.
 #[inline(always)]
 pub fn xcorr_kernel(x: &[i32], y: &[i32], sum: &mut [i32; 4], len: usize) {
-    super::simd::xcorr_kernel_simd(x, y, sum, len);
+    #[cfg(feature = "simd")]
+    {
+        super::simd::xcorr_kernel_simd(x, y, sum, len);
+    }
+    #[cfg(not(feature = "simd"))]
+    {
+        // Scalar fallback with the same i16-truncation and wrapping-accumulate
+        // semantics as the wide-based kernel.
+        let mut s = *sum;
+        for j in 0..len {
+            s[0] = s[0].wrapping_add((x[j] as i16 as i32) * (y[j] as i16 as i32));
+            s[1] = s[1].wrapping_add((x[j] as i16 as i32) * (y[j + 1] as i16 as i32));
+            s[2] = s[2].wrapping_add((x[j] as i16 as i32) * (y[j + 2] as i16 as i32));
+            s[3] = s[3].wrapping_add((x[j] as i16 as i32) * (y[j + 3] as i16 as i32));
+        }
+        *sum = s;
+    }
 }
 
 /// Compute two inner products in a single pass.

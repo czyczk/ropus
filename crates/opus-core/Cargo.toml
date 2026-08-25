@@ -22,6 +22,15 @@ include = [
 
 [features]
 default = []
+# Compile the `wide`-based CELT SIMD kernels. Disabling this feature keeps a
+# bit-exact scalar fallback for xcorr, maxabs, band denormalisation, and MDCT
+# windowing. The decoder crate's default feature enables it; consumers can
+# override with default-features = false.
+simd = ["dep:wide"]
+# Opt-in compilation of the original DNN/deep-PLC/DRED modules. OFF by
+# default: this repository is scoped to RFC 6716 classical decoding and uses
+# the inert stubs in lib.rs instead.
+ml = []
 # Phase B encode-side trace tuples for Cluster A stage 2b. Emits
 # `(boundary_id, channel, ec_tell, rng, target_rate_bps, n_bits_exceeded,
 # curr_n_bits_used_lbrr, n_bits_used_lbrr, mid_only_flag,
@@ -32,13 +41,7 @@ default = []
 trace-silk-encode = []
 
 [dependencies]
-wide = "0.7"
-
-[build-dependencies]
-# Used by build.rs only to compile + run a tiny weight-blob generator
-# when the xiph reference sources are present. Builds without a C
-# toolchain still succeed — the blob is emitted empty in that case.
-cc = "1"
+wide = { version = "0.7", optional = true }
 
 [dev-dependencies]
 proptest = "1"
