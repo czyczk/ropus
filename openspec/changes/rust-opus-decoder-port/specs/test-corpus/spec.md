@@ -29,7 +29,7 @@ The corpus SHALL cover, at minimum: CELT-only decoding via music at multiple bit
 
 ### Requirement: Golden reproduction with pinned original opusdec
 
-A reproduction guide and script SHALL regenerate golden decoded audio outside git using the pinned original `opusdec` (opus-tools v0.2) built against the pinned reference libopus v1.6.1. The guide SHALL record exact revisions, configure flags, and invocation so results are reproducible.
+A reproduction guide and script SHALL regenerate golden decoded audio outside git using the pinned original decoder (`opus_demo` from libopus v1.6.1, with `opusdec` from opus-tools v0.2 recorded for Ogg files). The guide SHALL record exact revisions, configure flags, and invocation so results are reproducible.
 
 #### Scenario: Golden regeneration is reproducible
 

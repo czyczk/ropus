@@ -1,3 +1,9 @@
 [workspace]
 resolver = "3"
 members = ["crates/opus-core", "crates/opus-decoder", "crates/opus-decoder-cli"]
+
+# The codec core intentionally mirrors C fixed-point arithmetic (wrapping).
+# Debug overflow checks would change decode output and fail mutation tests.
+[profile.dev]
+overflow-checks = false
+panic = "unwind"

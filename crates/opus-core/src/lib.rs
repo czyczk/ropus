@@ -6,7 +6,7 @@
 //! The stable public API consists of the items re-exported at the crate root
 //! (e.g. [`OpusEncoder`], [`OpusDecoder`], [`OpusMSEncoder`], [`OpusMSDecoder`],
 //! [`OpusRepacketizer`], and the `OPUS_*` constants). Items reachable via module
-//! paths (`ropus::opus::*`, `ropus::celt::*`, `ropus::silk::*`, `ropus::dnn::*`)
+//! paths (`opus_core::opus::*`, `opus_core::celt::*`, `opus_core::silk::*`, `opus_core::dnn::*`)
 //! are accessible but are **not** subject to semver stability guarantees pre-1.0;
 //! a future 1.0 release will tighten this surface.
 //!
@@ -15,7 +15,7 @@
 //! Encode 20 ms of silence at 48 kHz mono in VOIP mode and decode it back:
 //!
 //! ```
-//! use ropus::{Application, Channels, DecodeMode, Decoder, Encoder};
+//! use opus_core::{Application, Channels, DecodeMode, Decoder, Encoder};
 //!
 //! let mut encoder = Encoder::builder(48_000, Channels::Mono, Application::Voip)
 //!     .build()
@@ -37,7 +37,7 @@
 //! - **High-level** ([`Encoder`], [`Decoder`]): typed enums ([`DecodeMode`],
 //!   [`Channels`], [`Bitrate`], ...), `Result<_, …Error>` error types, hidden
 //!   `i32` codes. Use this for new Rust code.
-//! - **Low-level** (`ropus::opus::*`, `ropus::celt::*`, `ropus::silk::*`,
+//! - **Low-level** (`opus_core::opus::*`, `opus_core::celt::*`, `opus_core::silk::*`,
 //!   including [`OpusDecoder`], [`OpusMSDecoder`]): mirrors the libopus C ABI
 //!   verbatim — `bool decode_fec`, `Result<i32, i32>`, raw `i32` channel
 //!   counts. Stable so the `capi/` crate can present a byte-identical FFI.
@@ -49,7 +49,7 @@
 //! let mut output = [0_i16; 2];
 //! let signal = [0_i16; 1];
 //! let coefficients = [0_i16; 1];
-//! ropus::silk::common::silk_lpc_analysis_filter(
+//! opus_core::silk::common::silk_lpc_analysis_filter(
 //!     &mut output,
 //!     &signal,
 //!     &coefficients,

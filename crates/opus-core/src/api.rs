@@ -3,13 +3,13 @@
 //! This module is a thin facade over [`crate::opus::encoder::OpusEncoder`] and
 //! [`crate::opus::decoder::OpusDecoder`]. It contains no codec logic of its own;
 //! every method delegates to the existing implementations and reuses their
-//! constants. Use the low-level modules (`ropus::opus::*`, `ropus::celt::*`,
+//! constants. Use the low-level modules (`opus_core::opus::*`, `opus_core::celt::*`,
 //! etc.) when you need finer control than this surface exposes.
 //!
 //! # Example
 //!
 //! ```no_run
-//! use ropus::{Application, Bitrate, Channels, DecodeMode, Decoder, Encoder};
+//! use opus_core::{Application, Bitrate, Channels, DecodeMode, Decoder, Encoder};
 //!
 //! let mut encoder = Encoder::builder(48_000, Channels::Stereo, Application::Audio)
 //!     .bitrate(Bitrate::Bits(64_000))
@@ -382,7 +382,7 @@ impl FrameDuration {
 /// # Examples
 ///
 /// ```no_run
-/// use ropus::{Channels, Decoder, DecodeMode};
+/// use opus_core::{Channels, Decoder, DecodeMode};
 /// # fn run() -> Result<(), Box<dyn std::error::Error>> {
 /// let mut decoder = Decoder::new(48_000, Channels::Mono)?;
 /// let packet: &[u8] = &[];

@@ -173,6 +173,11 @@ impl Decoder {
         self.inner.reset();
     }
 
+    /// Apply output gain in Q8 dB units, mirroring `OPUS_SET_GAIN`.
+    pub fn set_gain(&mut self, gain_q8: i32) -> Result<(), Error> {
+        self.inner.set_gain(gain_q8).map_err(from_core_code)
+    }
+
     /// Configured output sample rate.
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate

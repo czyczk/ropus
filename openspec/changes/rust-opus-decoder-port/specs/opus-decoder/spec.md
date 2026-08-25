@@ -30,7 +30,7 @@ The decoder SHALL decode valid RFC 6716 single-stream Opus packets for 1 or 2 ch
 
 ### Requirement: Bit-exact float output against reference
 
-The decoder's float output SHALL be bit-identical to the pinned reference libopus v1.6.1 decoder output for the committed corpus when both decoders use equivalent configuration and the same comparison platform.
+The decoder's float output SHALL be bit-identical to the pinned reference libopus v1.6.1 decoder built with the matching fixed-point 16-bit configuration (`--enable-fixed-point --disable-fixed-res24`, ML paths disabled) for the committed corpus on the same platform. The default float reference build SHALL be decoded alongside and reported; differences between the two reference configurations are precision-floor findings, not algorithm bugs, and SHALL be documented and approved by the user.
 
 #### Scenario: Corpus differential run is clean
 

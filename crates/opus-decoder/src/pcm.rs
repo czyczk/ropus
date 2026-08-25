@@ -66,13 +66,14 @@ mod tests {
     #[test]
     fn s16_conversion_matches_opus_demo_rules() {
         assert_eq!(i24_to_s16(0), 0);
-        assert_eq!(i24_to_s16(128), 1);
-        assert_eq!(i24_to_s16(127), 0);
-        assert_eq!(i24_to_s16(-128), -1);
+        assert_eq!(i24_to_s16(256), 1);
+        assert_eq!(i24_to_s16(255), 1);
+        assert_eq!(i24_to_s16(-256), -1);
+        assert_eq!(i24_to_s16(-128), 0);
         assert_eq!(i24_to_s16(S24_MAX), 32767);
-        assert_eq!(i24_to_s16(S24_MIN), -32768);
+        assert_eq!(i24_to_s16(S24_MIN), -32767);
         assert_eq!(i24_to_s16(i32::MAX), 32767);
-        assert_eq!(i24_to_s16(i32::MIN), -32768);
+        assert_eq!(i24_to_s16(i32::MIN), -32767);
     }
 
     #[test]

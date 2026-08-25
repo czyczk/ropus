@@ -1,16 +1,21 @@
 //! `ropusdec` — single-stream Opus decoder CLI.
 //!
-//! Input is the raw packet stream written by the reference `opus_demo`
-//! encoder (`u32be` packet length, `u32be` final range, payload). Output is a
-//! playable RIFF/WAVE file or headerless little-endian raw PCM in `s16`,
-//! packed `s24`, or IEEE-float `f32`.
+//! Two input forms are supported:
+//! - Ogg Opus (RFC 7845) files: channels/gain/pre-skip come from the
+//!   `OpusHead` packet, matching the original `opusdec` input.
+//! - `opus_demo` raw bitstreams (`u32be` packet length, `u32be` final range,
+//!   payload) for the self-contained differential corpus.
+//!
+//! Output is a playable RIFF/WAVE file or headerless little-endian raw PCM in
+//! `s16`, packed `s24`, or IEEE-float `f32`.
 
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Write};
+use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, ValueEnum};
+use ogg::reading::PacketReader;
 use opus_decoder::pcm::{self, Error as PcmError};
 use opus_decoder::{Channels, DecodeMode, Decoder};
 
@@ -36,22 +41,23 @@ enum SampleFormat {
 #[command(
     name = "ropusdec",
     version,
-    about = "Decode a single-stream Opus packet file (opus_demo raw stream) to WAV or raw PCM"
+    about = "Decode a single-stream Opus file (Ogg Opus or opus_demo raw stream) to WAV or raw PCM"
 )]
 struct Args {
-    /// Input file: opus_demo raw bitstream (u32be len, u32be final_range, payload).
+    /// Input file: Ogg Opus (.opus) or opus_demo raw bitstream.
     input: PathBuf,
 
     /// Output file (.wav or raw, depending on --output-type).
     output: PathBuf,
 
-    /// Decoder output sample rate in Hz.
+    /// Decoder output sample rate in Hz (Opus API rate).
     #[arg(long, default_value_t = 48000)]
     rate: u32,
 
-    /// Stream channel count (opus_demo raw streams do not carry a container header).
+    /// Stream channel count. Required for opus_demo raw streams; for Ogg input
+    /// it is optional and must match the OpusHead header when supplied.
     #[arg(long, value_parser = clap::value_parser!(u8).range(1..=2))]
-    channels: u8,
+    channels: Option<u8>,
 
     /// Output container.
     #[arg(long, value_enum, default_value_t = OutputType::Wav)]
@@ -63,29 +69,77 @@ struct Args {
 }
 
 const MAX_FRAME_SAMPLES_PER_CHANNEL: usize = 5760; // 120 ms at 48 kHz
+const OGG_CAPTURE: &[u8; 4] = b"OggS";
 
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    let channels = match args.channels {
-        1 => Channels::Mono,
-        2 => Channels::Stereo,
-        n => return Err(anyhow!("unsupported channel count {n}; expected 1 or 2")),
+    let mut file = File::open(&args.input)
+        .with_context(|| format!("failed to open input {}", args.input.display()))?;
+    let mut magic = [0u8; 4];
+    file.read_exact(&mut magic).unwrap_or_default();
+    file.seek(SeekFrom::Start(0))?;
+
+    let decoded = if &magic == OGG_CAPTURE {
+        decode_ogg(&args, file)?
+    } else {
+        decode_raw_demo(&args, file)?
     };
 
-    let mut decoder = Decoder::new(args.rate, channels).with_context(|| {
-        format!(
-            "failed to create decoder for {} Hz, {} channel(s)",
-            args.rate,
-            channels.count()
-        )
-    })?;
+    if decoded.bytes.is_empty() {
+        return Err(anyhow!("no audio decoded from {}", args.input.display()));
+    }
 
-    let mut input = BufReader::new(
-        File::open(&args.input)
-            .with_context(|| format!("failed to open input {}", args.input.display()))?,
+    let out = File::create(&args.output)
+        .with_context(|| format!("failed to create output {}", args.output.display()))?;
+    let mut out = BufWriter::new(out);
+    let channels = decoded.channels as usize;
+    match args.output_type {
+        OutputType::Raw => {
+            out.write_all(&decoded.bytes)
+                .with_context(|| format!("failed writing raw PCM to {}", args.output.display()))?;
+        }
+        OutputType::Wav => {
+            write_wav(&mut out, decoded.rate, channels, args.sample_format, &decoded.bytes)
+                .context("failed writing WAV output")?;
+        }
+    }
+    out.flush().context("failed flushing output")?;
+    eprintln!(
+        "decoded {} PCM bytes ({} samples/channel) to {}",
+        decoded.bytes.len(),
+        decoded.bytes.len() / bytes_per_sample(args.sample_format) / channels,
+        args.output.display()
     );
+    Ok(())
+}
 
+struct DecodedAudio {
+    bytes: Vec<u8>,
+    rate: u32,
+    channels: u8,
+}
+
+fn bytes_per_sample(format: SampleFormat) -> usize {
+    match format {
+        SampleFormat::S16 => 2,
+        SampleFormat::S24 => 3,
+        SampleFormat::F32 => 4,
+    }
+}
+
+fn decode_raw_demo(args: &Args, mut input: File) -> Result<DecodedAudio> {
+    let channels = match args.channels {
+        Some(1) => Channels::Mono,
+        Some(2) => Channels::Stereo,
+        Some(n) => return Err(anyhow!("unsupported channel count {n}; expected 1 or 2")),
+        None => {
+            return Err(anyhow!(
+                "--channels is required for opus_demo raw bitstream input"
+            ))
+        }
+    };
+    let mut decoder = new_decoder(args, channels)?;
     let mut decoded = Vec::<u8>::new();
     let mut header = [0u8; 8];
     let mut payload = Vec::new();
@@ -100,7 +154,6 @@ fn main() -> Result<()> {
                     "failed reading packet header from {}: {e}",
                     args.input.display()
                 ))
-                .context("I/O error while reading input")
             }
         }
         let len = u32::from_be_bytes(header[0..4].try_into().expect("4 bytes")) as usize;
@@ -112,38 +165,8 @@ fn main() -> Result<()> {
             )
         })?;
         packet_index += 1;
-
-        let interleaved = MAX_FRAME_SAMPLES_PER_CHANNEL * channels.count();
-        match args.sample_format {
-            SampleFormat::S16 => {
-                let mut pcm = vec![0i16; interleaved];
-                let n = decoder
-                    .decode(Some(&payload), &mut pcm, DecodeMode::Normal)
-                    .with_context(|| format!("decoding packet {packet_index} failed"))?;
-                for s in &pcm[..n * channels.count()] {
-                    decoded.extend_from_slice(&s.to_le_bytes());
-                }
-            }
-            SampleFormat::S24 => {
-                let mut pcm = vec![0i32; interleaved];
-                let n = decoder
-                    .decode24(Some(&payload), &mut pcm, DecodeMode::Normal)
-                    .with_context(|| format!("decoding packet {packet_index} failed"))?;
-                for s in &pcm[..n * channels.count()] {
-                    let s = pcm::i24_to_s24(*s);
-                    decoded.extend_from_slice(&s.to_le_bytes()[..3]);
-                }
-            }
-            SampleFormat::F32 => {
-                let mut pcm = vec![0f32; interleaved];
-                let n = decoder
-                    .decode_float(Some(&payload), &mut pcm, DecodeMode::Normal)
-                    .with_context(|| format!("decoding packet {packet_index} failed"))?;
-                for s in &pcm[..n * channels.count()] {
-                    decoded.extend_from_slice(&s.to_le_bytes());
-                }
-            }
-        }
+        decode_packet(args.sample_format, &mut decoder, &payload, channels, &mut decoded)
+            .with_context(|| format!("decoding packet {packet_index} failed"))?;
     }
 
     if packet_index == 0 {
@@ -153,35 +176,201 @@ fn main() -> Result<()> {
         ));
     }
 
-    let out = File::create(&args.output)
-        .with_context(|| format!("failed to create output {}", args.output.display()))?;
-    let mut out = BufWriter::new(out);
+    Ok(DecodedAudio {
+        bytes: decoded,
+        rate: args.rate,
+        channels: channels.count() as u8,
+    })
+}
 
-    match args.output_type {
-        OutputType::Raw => {
-            out.write_all(&decoded)
-                .with_context(|| format!("failed writing raw PCM to {}", args.output.display()))?;
-        }
-        OutputType::Wav => {
-            write_wav(
-                &mut out,
-                args.rate,
-                channels.count(),
-                args.sample_format,
-                &decoded,
-            )
-            .context("failed writing WAV output")?;
+fn decode_ogg(args: &Args, file: File) -> Result<DecodedAudio> {
+    if args.rate != 48000 {
+        return Err(anyhow!(
+            "Ogg input currently requires --rate 48000 (resampling is not implemented yet)"
+        ));
+    }
+    let mut reader: PacketReader<Box<dyn ReadSeek>> =
+        PacketReader::new(Box::new(BufReader::new(file)));
+
+    let head_pkt = reader
+        .read_packet()
+        .context("failed reading Ogg pages")?
+        .ok_or_else(|| anyhow!("no packets found in Ogg input"))?;
+    let head = parse_opus_head(&head_pkt.data)?;
+
+    if let Some(requested) = args.channels
+        && requested != head.channels
+    {
+        return Err(anyhow!(
+            "--channels {requested} does not match OpusHead channels {}",
+            head.channels
+        ));
+    }
+    let channels = match head.channels {
+        1 => Channels::Mono,
+        2 => Channels::Stereo,
+        n => return Err(anyhow!("unsupported OpusHead channel count {n}; expected 1 or 2")),
+    };
+
+    // OpusTags packet is required by RFC 7845 but does not affect PCM output.
+    let tags = reader
+        .read_packet()
+        .context("failed reading Ogg packets")?
+        .ok_or_else(|| anyhow!("Ogg input ended after OpusHead"))?;
+    if tags.data.len() < 8 || &tags.data[..8] != b"OpusTags" {
+        return Err(anyhow!("second Ogg packet is not OpusTags"));
+    }
+
+    let mut decoder = new_decoder(args, channels)?;
+    if head.output_gain != 0 {
+        decoder
+            .set_gain(i32::from(head.output_gain))
+            .context("applying OpusHead output gain")?;
+    }
+
+    let mut decoded = Vec::<u8>::new();
+    let mut packet_index = 0u64;
+    let mut last_granule = 0u64;
+    loop {
+        let packet = reader
+            .read_packet()
+            .context("failed reading Ogg packets")?;
+        let Some(packet) = packet else { break };
+        packet_index += 1;
+        last_granule = packet.absgp_page();
+        decode_packet(
+            args.sample_format,
+            &mut decoder,
+            &packet.data,
+            channels,
+            &mut decoded,
+        )
+        .with_context(|| format!("decoding Ogg packet {packet_index} failed"))?;
+    }
+
+    if packet_index == 0 {
+        return Err(anyhow!("Ogg input contained no Opus audio packets"));
+    }
+
+    // OpusHead.pre_skip samples per channel must be trimmed at the 48 kHz
+    // codec rate (RFC 7845 section 4.2); the last page granule position then
+    // determines the exact end of the stream, so truncate any encoder
+    // padding after that point.
+    let bytes_per_ch = bytes_per_sample(args.sample_format);
+    let skip_bytes = usize::from(head.pre_skip) * usize::from(head.channels) * bytes_per_ch;
+    if skip_bytes > decoded.len() {
+        return Err(anyhow!(
+            "OpusHead pre_skip {} trims more samples than decoded",
+            head.pre_skip
+        ));
+    }
+    decoded.drain(..skip_bytes);
+
+    if last_granule > u64::from(head.pre_skip) {
+        let desired_samples =
+            (last_granule - u64::from(head.pre_skip)) * u64::from(head.channels);
+        let desired_bytes = usize::try_from(desired_samples)
+            .ok()
+            .and_then(|s| s.checked_mul(bytes_per_ch))
+            .ok_or_else(|| anyhow!("Ogg granule-derived output size overflows"))?;
+        if desired_bytes < decoded.len() {
+            decoded.truncate(desired_bytes);
         }
     }
 
-    out.flush().context("failed flushing output")?;
-    eprintln!(
-        "decoded {packet_index} packet(s), {} PCM bytes to {}",
-        decoded.len(),
-        args.output.display()
-    );
+    Ok(DecodedAudio {
+        bytes: decoded,
+        rate: args.rate,
+        channels: channels.count() as u8,
+    })
+}
+
+fn new_decoder(args: &Args, channels: Channels) -> Result<Decoder> {
+    Decoder::new(args.rate, channels).with_context(|| {
+        format!(
+            "failed to create decoder for {} Hz, {} channel(s)",
+            args.rate,
+            channels.count()
+        )
+    })
+}
+
+fn decode_packet(
+    format: SampleFormat,
+    decoder: &mut Decoder,
+    payload: &[u8],
+    channels: Channels,
+    out: &mut Vec<u8>,
+) -> Result<()> {
+    let interleaved = MAX_FRAME_SAMPLES_PER_CHANNEL * channels.count();
+    match format {
+        SampleFormat::S16 => {
+            // Match `opus_demo -16`, which decodes through the 24-bit path and
+            // rounds/saturates back to s16 (this clamps -2^23 to -32767).
+            let mut pcm = vec![0i32; interleaved];
+            let n = decoder.decode24(Some(payload), &mut pcm, DecodeMode::Normal)?;
+            for s in &pcm[..n * channels.count()] {
+                let s = pcm::i24_to_s16(*s);
+                out.extend_from_slice(&s.to_le_bytes());
+            }
+        }
+        SampleFormat::S24 => {
+            let mut pcm = vec![0i32; interleaved];
+            let n = decoder.decode24(Some(payload), &mut pcm, DecodeMode::Normal)?;
+            for s in &pcm[..n * channels.count()] {
+                let s = pcm::i24_to_s24(*s);
+                out.extend_from_slice(&s.to_le_bytes()[..3]);
+            }
+        }
+        SampleFormat::F32 => {
+            let mut pcm = vec![0f32; interleaved];
+            let n = decoder.decode_float(Some(payload), &mut pcm, DecodeMode::Normal)?;
+            for s in &pcm[..n * channels.count()] {
+                out.extend_from_slice(&s.to_le_bytes());
+            }
+        }
+    }
     Ok(())
 }
+
+struct OpusHead {
+    channels: u8,
+    pre_skip: u16,
+    output_gain: i16,
+}
+
+fn parse_opus_head(data: &[u8]) -> Result<OpusHead> {
+    if data.len() != 19 || &data[..8] != b"OpusHead" {
+        return Err(anyhow!("malformed OpusHead packet"));
+    }
+    let version = data[8];
+    if version == 0 || (version & 0xF0) != 0 {
+        return Err(anyhow!("unsupported OpusHead version 0x{version:02x}"));
+    }
+    let channels = data[9];
+    let pre_skip = u16::from_le_bytes(data[10..12].try_into().expect("2 bytes"));
+    let input_sample_rate = u32::from_le_bytes(data[12..16].try_into().expect("4 bytes"));
+    if input_sample_rate != 48000 {
+        return Err(anyhow!(
+            "unsupported OpusHead input sample rate {input_sample_rate}; expected 48000"
+        ));
+    }
+    let output_gain = i16::from_le_bytes(data[16..18].try_into().expect("2 bytes"));
+    if data[18] != 0 {
+        return Err(anyhow!(
+            "unsupported OpusHead channel mapping family {}; expected family 0",
+            data[18]
+        ));
+    }
+    Ok(OpusHead {
+        channels,
+        pre_skip,
+        output_gain,
+    })
+}
+
+trait ReadSeek: Read + Seek {}
+impl<T: Read + Seek> ReadSeek for T {}
 
 fn write_wav(
     out: &mut impl Write,
