@@ -59,11 +59,11 @@ is in `PERFORMANCE.md`.
 | --- | --- | --- | --- | --- |
 | Linux x86-64 | pass | 19/19 bit-exact | ~0.88 (simd), ~1.01 (scalar) | reference machine |
 | macOS arm64 | ? | ? | ? | |
-| Linux arm64 | ? | ? | ? | |
-| Windows x86-64 | ? | ? | ? | |
-| Windows arm64 | ? | ? | ? | |
-| wasm32 simd | compile | ? | ? | compile-verified, runtime TBD |
-| wasm32 scalar | compile | ? | ? | compile-verified, runtime TBD |
+| Linux arm64 | cross-check passes | TBD on ARM hw | ? | both simd/scalar compile |
+| Windows x86-64 | cross-check passes | TBD on Windows | ? | both simd/scalar compile |
+| Windows arm64 | cross-check passes | TBD on Windows ARM | ? | both simd/scalar compile |
+| wasm32 simd | compile + wasmtime | 19/19 matches native | ? | wasi CLI run |
+| wasm32 scalar | compile | TBD | ? | scalar wasi run not repeated |
 
 ## wasm
 

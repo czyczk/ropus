@@ -69,5 +69,7 @@ denormalisation, MDCT windowing) via the portable `wide` crate.
 - Explicit AVX/NEON hand-written kernels beyond the `wide` port remain future
   work; the current gains come from the vendored portable kernels plus LLVM
   auto-vectorization.
-- wasm32 builds compile in both feature modes; runtime wasm benchmarking is
-  not yet available on this machine (no wasm runtime installed).
+- wasm32 builds compile in both feature modes. The `wasm32-wasip1` release CLI
+  was run under wasmtime on all 19 corpus cases and produced byte-identical
+  output to the native Rust decoder; wasm runtime benchmarking (timing) is
+  still pending.
