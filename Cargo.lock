@@ -894,6 +894,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "wasm-bench"
+version = "0.1.0"
+dependencies = [
+ "opus-decoder",
+]
+
+[[package]]
 name = "wasm-bindgen"
 version = "0.2.127"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -14,14 +14,18 @@ Targets: macOS arm64, Linux arm64, Windows x86-64, Windows arm64, wasm32.
 
 ```sh
 cargo build --release --workspace                 # native, default SIMD
-cargo build --release --workspace --no-default-features   # scalar fallback
+cargo build --release --workspace --no-default-features   # scalar kernels
 ```
+
+Default codegen baselines (`.cargo/config.toml`):
+- x86-64: Haswell+ (`x86-64-v3`, AVX2/FMA). Override with
+  `RUSTFLAGS="-C target-cpu=x86-64"`.
+- wasm32: `+simd128`; runtime/engine must support the wasm SIMD proposal.
 
 - On macOS/Linux this produces `target/release/ropusdec`.
 - On Windows the binary is `target\release\ropusdec.exe`.
-- On Windows arm64 and Linux arm64, `--no-default-features` is the fallback
-  until explicit Neon kernels land; default build still compiles and uses the
-  portable `wide` kernels where LLVM can target the architecture.
+- On Windows arm64 and Linux arm64, the portable `wide` kernels compile and
+  LLVM can lower them to Neon; explicit Neon intrinsics are still future work.
 
 ## Test and validate
 
@@ -73,9 +77,8 @@ cargo build -p opus-decoder --target wasm32-unknown-unknown
 cargo build -p opus-decoder --target wasm32-unknown-unknown --no-default-features
 ```
 
-Both configurations compile. The wasm32-wasip1 release CLI was run under
-wasmtime on all 19 corpus cases and matched native output byte-for-byte.
-Note: the cargo `simd` feature is currently a no-op for wasm — it does not
-enable wasm SIMD128 unless `-C target-feature=+simd128` is also passed (Cargo
-features cannot set codegen target features). See `PERFORMANCE.md` for the
-corrected SIMD128 experiment matrix and next steps.
+The wasm32-wasip1 release CLI runs under wasmtime and matched native output
+byte-for-byte on all 19 corpus cases. wasm32-unknown-unknown Node benchmarks
+use `scripts/bench-wasm-node.mjs`; see `PERFORMANCE.md` for the wasmtime/V8
+SIMD128 matrix. Cargo features cannot set codegen target features, so wasm
+SIMD128 is enabled by `.cargo/config.toml` rather than by the `simd` feature.

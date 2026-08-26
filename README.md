@@ -22,8 +22,10 @@ cargo build --release --workspace
 cargo test --workspace
 ```
 
-Default features enable portable `wide`-based SIMD kernels. Use
-`--no-default-features` for the bit-exact scalar fallback.
+Default features enable portable `wide`-based SIMD kernels. The default
+x86-64 codegen baseline is Haswell+ (`x86-64-v3`, AVX2/FMA); override with
+`RUSTFLAGS="-C target-cpu=x86-64"`. wasm32 builds default to `+simd128`.
+Use `--no-default-features` for the bit-exact scalar-kernel fallback.
 
 ## Validate against the reference
 

@@ -1,0 +1,14 @@
+# Default codegen baselines.
+#
+# x86-64 targets require Haswell or newer (AVX2/FMA/BMI). This is the default
+# performance baseline, mirroring the upstream ropus configuration. Override
+# with the RUSTFLAGS environment variable, e.g.:
+#   RUSTFLAGS="-C target-cpu=x86-64" cargo build ...
+#
+# wasm32 targets enable SIMD128 so LLVM can auto-vectorize; engines/runtimes
+# must support the wasm SIMD proposal (V8, SpiderMonkey, wasmtime do).
+[target.'cfg(target_arch = "x86_64")']
+rustflags = ["-C", "target-cpu=x86-64-v3"]
+
+[target.'cfg(target_arch = "wasm32")']
+rustflags = ["-C", "target-feature=+simd128"]
