@@ -66,23 +66,49 @@ denormalisation, MDCT windowing) via the portable `wide` crate.
     shows 0 YMM/ZMM/AVX instructions and no SSE4.1-only instructions; no
     AVX is emitted because the build does not set a higher `target-cpu`.
   - aarch64: `int32x4_t` (Neon 128-bit); cross-compile verified.
-  - wasm32: `v128` (SIMD128) under the `simd` feature.
+  - wasm32: see below — **the cargo feature alone does not emit SIMD128**
+    because wasm SIMD is a codegen target feature, not a crate feature.
 
-## wasm runtime benchmark (wasmtime)
+## AVX2 experiment
 
-wasm32-wasip1 release CLI, 10 process runs per case, decode to f32 raw:
+`RUSTFLAGS="-C target-cpu=x86-64-v3"` produces 5,522 AVX/YMM-family
+instructions (baseline SSE2 build: 0). Criterion decode-only medians, same
+corpus cases:
 
-| case | wasm simd | wasm scalar | simd/scalar |
+| case | SSE2 | x86-64-v3 (AVX2/FMA) | speedup |
 | --- | ---: | ---: | ---: |
-| celt-stereo-96k | 161.1 ms | 145.7 ms | 1.106 |
-| silk-mono-12k | 65.5 ms | 58.1 ms | 1.127 |
-| hybrid-mono-32k | 100.4 ms | 88.9 ms | 1.129 |
-| silk-dtx-mono-12k | 68.6 ms | 61.2 ms | 1.121 |
+| celt-stereo-96k | 48.1 ms | 43.3 ms | 1.11x |
+| silk-mono-12k | 13.2 ms | 12.6 ms | 1.04x |
+| hybrid-mono-32k | 25.3 ms | 23.8 ms | 1.06x |
+| silk-dtx-mono-12k | 14.7 ms | 14.8 ms | ~1.00x |
 
-On wasmtime the current `wide`/SIMD128 path is ~12% slower than the scalar
-fallback (which LLVM auto-vectorizes effectively), while outputs remain
-byte-identical. This is a wasm-specific optimization finding, not a
-correctness issue.
+Conclusion: AVX2 is not necessary — the SSE2/default build is already faster
+than the fixed-point reference and bit-exact — but it gives a real 4–11%
+decode-core gain in CELT/hybrid. It belongs in an opt-in
+`simd-avx2`-style feature (or runtime dispatch), not in the portable default.
+
+## wasm SIMD128 experiment (wasmtime)
+
+Key finding: `opus-core/simd` and `--no-default-features` produce
+**byte-identical wasm binaries** unless `-C target-feature=+simd128` is passed
+at build time. `wasm-tools print` confirms 0 SIMD opcodes without the flag.
+Cargo features cannot enable codegen target features, so the feature currently
+has no effect on wasm.
+
+With `-C target-feature=+simd128` (interleaved 25-run medians, warmup first,
+wasmtime on x86-64):
+
+| case | no SIMD128 | +SIMD128 | ratio |
+| --- | ---: | ---: | ---: |
+| celt-stereo-96k | 107.2 ms | 102.2 ms | 0.954 |
+| silk-mono-12k | 41.5 ms | 43.0 ms | 1.036 |
+| hybrid-mono-32k | 68.6 ms | 60.1 ms | 0.875 |
+| silk-dtx-mono-12k | 49.9 ms | 50.9 ms | 1.020 |
+
+Global SIMD128 helps CELT (~5%) and hybrid (~12.5%) but slightly hurts SILK
+and DTX. The scientific next step is per-function
+`#[target_feature(enable = "simd128")]` kernels for the CELT loops only, with
+SILK kept scalar, then re-benchmark under wasmtime and (ideally) V8/SpiderMonkey.
 
 ## Known optimization boundaries
 

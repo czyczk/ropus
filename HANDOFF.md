@@ -74,7 +74,8 @@ cargo build -p opus-decoder --target wasm32-unknown-unknown --no-default-feature
 ```
 
 Both configurations compile. The wasm32-wasip1 release CLI was run under
-wasmtime on all 19 corpus cases and matched native output byte-for-byte
-(simd build); scalar-vs-simd wasm outputs are also byte-identical. On
-wasmtime the scalar build is currently ~12% faster than the simd build —
-see `PERFORMANCE.md` for the table.
+wasmtime on all 19 corpus cases and matched native output byte-for-byte.
+Note: the cargo `simd` feature is currently a no-op for wasm — it does not
+enable wasm SIMD128 unless `-C target-feature=+simd128` is also passed (Cargo
+features cannot set codegen target features). See `PERFORMANCE.md` for the
+corrected SIMD128 experiment matrix and next steps.
