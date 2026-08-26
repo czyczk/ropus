@@ -61,6 +61,28 @@ denormalisation, MDCT windowing) via the portable `wide` crate.
   bit-exact scalar fallbacks for the four gated CELT kernels.
 - Full-corpus invariance: both builds report `19 cases compared, 0 failures`
   against the fixed16 reference, and their raw outputs are byte-identical.
+- Instruction sets actually used by `wide::i32x4` in this code:
+  - x86-64: `__m128i` (SSE2 baseline). `objdump` of `target/release/ropusdec`
+    shows 0 YMM/ZMM/AVX instructions and no SSE4.1-only instructions; no
+    AVX is emitted because the build does not set a higher `target-cpu`.
+  - aarch64: `int32x4_t` (Neon 128-bit); cross-compile verified.
+  - wasm32: `v128` (SIMD128) under the `simd` feature.
+
+## wasm runtime benchmark (wasmtime)
+
+wasm32-wasip1 release CLI, 10 process runs per case, decode to f32 raw:
+
+| case | wasm simd | wasm scalar | simd/scalar |
+| --- | ---: | ---: | ---: |
+| celt-stereo-96k | 161.1 ms | 145.7 ms | 1.106 |
+| silk-mono-12k | 65.5 ms | 58.1 ms | 1.127 |
+| hybrid-mono-32k | 100.4 ms | 88.9 ms | 1.129 |
+| silk-dtx-mono-12k | 68.6 ms | 61.2 ms | 1.121 |
+
+On wasmtime the current `wide`/SIMD128 path is ~12% slower than the scalar
+fallback (which LLVM auto-vectorizes effectively), while outputs remain
+byte-identical. This is a wasm-specific optimization finding, not a
+correctness issue.
 
 ## Known optimization boundaries
 

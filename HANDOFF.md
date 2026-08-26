@@ -73,6 +73,8 @@ cargo build -p opus-decoder --target wasm32-unknown-unknown
 cargo build -p opus-decoder --target wasm32-unknown-unknown --no-default-features
 ```
 
-Both configurations compile. A wasmtime/node runtime decode test is the
-remaining step for runtime wasm correctness; native decode is bit-exact, and
-the scalar/SIMD Rust paths are identical by construction.
+Both configurations compile. The wasm32-wasip1 release CLI was run under
+wasmtime on all 19 corpus cases and matched native output byte-for-byte
+(simd build); scalar-vs-simd wasm outputs are also byte-identical. On
+wasmtime the scalar build is currently ~12% faster than the simd build —
+see `PERFORMANCE.md` for the table.
