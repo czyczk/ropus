@@ -90,37 +90,33 @@ Official `scripts/bench-reference.py`, 21 iterations, pinned CPU, f32 to
 
 | case | Rust | reference | ratio |
 | --- | ---: | ---: | ---: |
-| music-a-celt-096k stereo | 41.3 ms | 35.0 ms | 1.180 |
-| speech-silk-012k mono | 13.5 ms | 9.5 ms | 1.417 |
-| speech-hybrid-032k mono | 24.8 ms | 19.7 ms | 1.260 |
-| speech-silk-dtx mono | 16.8 ms | 12.8 ms | 1.310 |
-| **mean** | | | **1.292** |
+| music-a-celt-096k stereo | 47.8 ms | 42.0 ms | 1.139 |
+| speech-silk-012k mono | 14.9 ms | 11.4 ms | 1.311 |
+| speech-hybrid-032k mono | 25.9 ms | 22.0 ms | 1.177 |
+| speech-silk-dtx mono | 17.7 ms | 14.2 ms | 1.247 |
+| **mean** | | | **1.219** |
 
-Interleaved 41-run medians on the same pinned core gave mean **1.278**
-(CELT 1.178, SILK 1.419, hybrid 1.220, DTX 1.296). The first arm64 baseline
-on this machine was **1.548**; the work in this change recovers about 17%
-mean process time.
+The three-way interleaved medians that introduced the generic/CELT changes
+gave the same ordering (CELT 1.140, SILK 1.312, hybrid 1.169, DTX 1.250),
+so the improvement is not an artifact of the official script's case order.
+The first arm64 baseline on this machine was **1.548**; this change recovers
+about 21% of mean process time.
 
-Criterion decode-only, default arm64 build (20 samples):
-
-- celt-stereo-96k: 36.0 ms
-- silk-mono-12k: 9.84 ms
-- hybrid-mono-32k: 20.6 ms
-- silk-dtx-mono-12k: 13.1 ms
-
-Decode-only medians are close to or below the fixed16 reference process
-medians on the same machine; the remaining process-level gap is CLI output
-path/file-read overhead plus the stricter Rust safety checks in the hot SILK
-core. This is recorded as the current arm64 boundary, not as a CELT/SILK
-algorithm regression.
+Criterion remains useful for decode-only comparisons, but on this WSL2 host
+its wall-clock medians are more frequency-sensitive than the interleaved
+process benchmark; use the process ratios above as the record for arm64.
 
 ### arm64 hotspot evidence (perf, armv8 PMU)
 
 `perf` was unpacked locally (`.refbuild/tools`) without touching the system.
-For `speech-silk-012k-20ms` the dominant cost is `silk_decode_core`
-(about 46% of sampled cycles), followed by the IIR/FIR resampler (~15%) and
-up2_HQ (~13%). Within `silk_decode_core`, the recursive LPC synthesis dot
-product and its gain/saturation output dominate.
+
+- `speech-silk-012k-20ms`: `silk_decode_core` dominates (~46% of sampled
+  cycles), followed by IIR/FIR resampler (~15%) and up2_HQ (~13%); within the
+  core, the recursive LPC dot product and gain/saturation output dominate.
+- `music-a-celt-096k-20ms`: `cwrsi`, `opus_fft_impl`, `clt_mdct_backward`,
+  and `deemphasis` each account for roughly 9–14% of sampled cycles;
+  `compute_theta`, `exp_rotation1`, `quant_partition`, and `stereo_merge`
+  are the next tier.
 
 ### arm64 optimizations applied
 
@@ -138,6 +134,15 @@ product and its gain/saturation output dominate.
   bit-exact on all 19 corpus cases).
 - Range coder: iterator-based iCDF walk removes per-symbol bounds checks and
   turns table overrun into an error state instead of a panic.
+- Generic CELT/CLI follow-up: raw `opus_demo` input now goes through a 64 KiB
+  `BufReader` (matching the reference stdio buffering); `clt_mdct_backward`
+  runs its FFT in-place on the interleaved output buffer instead of allocating
+  and copying a `Vec<KissFftCpx>` per MDCT (`KissFftCpx` is now `repr(C)`);
+  the MDCT pre-rotation input-length test is loop-invariant; hot
+  inner-product/normalisation/stereo-merge loops use unchecked reads after
+  debug assertions. A branchless padded-table variant of `cwrsi` was tried and
+  reverted: it was consistently ~2% slower on CELT in A/B runs, so the
+  predictable bounds branch remains.
 ## wasm: root cause of the earlier "negative optimization"
 
 The earlier finding was measurement noise plus a real configuration bug:
@@ -176,9 +181,11 @@ their SILK timings are equal within noise, as expected.
 
 ## Known optimization boundaries
 
-- Explicit hand-written AVX intrinsics and further CELT NEON kernels remain
-  future work. The SILK LPC/LTP recursive filters now have explicit aarch64
-  NEON kernels; the x86-64 path still relies on `wide`/LLVM.
+- Explicit hand-written AVX intrinsics remain future work. The SILK LPC/LTP
+  recursive filters now have explicit aarch64 NEON kernels; CELT still relies
+  on the portable `wide` kernels plus LLVM auto-vectorisation.
+- The remaining arm64 process gap is mostly SILK `silk_decode_core` and the
+  CLI/reference stdio path; CELT is close to parity (about 1.14x).
 - Browser engine variance matters: decisions should use the Node harness and,
   when possible, SpiderMonkey as a second data point.
 - wasm32-wasip1 CLI under wasmtime: all 19 corpus cases byte-identical to

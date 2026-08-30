@@ -150,7 +150,9 @@ fn initial_output_capacity(format: SampleFormat, input_bytes: u64) -> usize {
         .min(64 * 1024 * 1024)
 }
 
-fn decode_raw_demo(args: &Args, mut input: File) -> Result<DecodedAudio> {
+fn decode_raw_demo(args: &Args, input: File) -> Result<DecodedAudio> {
+    let input_len = input.metadata().map(|m| m.len()).unwrap_or(0);
+    let mut input = BufReader::with_capacity(64 * 1024, input);
     let channels = match args.channels {
         Some(1) => Channels::Mono,
         Some(2) => Channels::Stereo,
@@ -163,9 +165,7 @@ fn decode_raw_demo(args: &Args, mut input: File) -> Result<DecodedAudio> {
     };
     let mut decoder = new_decoder(args, channels)?;
     let mut decoded = Vec::<u8>::new();
-    if let Ok(meta) = input.metadata() {
-        decoded.reserve(initial_output_capacity(args.sample_format, meta.len()));
-    }
+    decoded.reserve(initial_output_capacity(args.sample_format, input_len));
     let mut header = [0u8; 8];
     let mut payload = Vec::new();
     let mut packet_index = 0u64;

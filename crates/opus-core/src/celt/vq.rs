@@ -37,9 +37,11 @@ fn celt_udiv(n: u32, d: u32) -> u32 {
 /// Accumulates `x[i] * y[i]` in i64, then shifts right by `2*(NORM_SHIFT-14) = 20`.
 /// Matches C `celt_inner_prod_norm_shift()`.
 pub fn celt_inner_prod_norm_shift(x: &[i32], y: &[i32], n: usize) -> i32 {
+    debug_assert!(x.len() >= n);
+    debug_assert!(y.len() >= n);
     let mut sum: i64 = 0;
     for i in 0..n {
-        sum += x[i] as i64 * y[i] as i64;
+        sum += uc!(x, i) as i64 * uc!(y, i) as i64;
     }
     (sum >> (2 * (NORM_SHIFT - 14))) as i32
 }
@@ -47,9 +49,11 @@ pub fn celt_inner_prod_norm_shift(x: &[i32], y: &[i32], n: usize) -> i32 {
 /// Inner product on Q14-scaled norm values (after scaledown).
 /// Matches C `celt_inner_prod_norm()`.
 fn celt_inner_prod_norm(x: &[i32], y: &[i32], n: usize) -> i32 {
+    debug_assert!(x.len() >= n);
+    debug_assert!(y.len() >= n);
     let mut sum: i32 = 0;
     for i in 0..n {
-        sum += x[i] * y[i];
+        sum += uc!(x, i) * uc!(y, i);
     }
     sum
 }
@@ -65,8 +69,9 @@ fn norm_scaledown(x: &mut [i32], n: usize, shift: i32) {
     if shift <= 0 {
         return;
     }
+    debug_assert!(x.len() >= n);
     for i in 0..n {
-        x[i] = pshr32(x[i], shift);
+        uc_set!(x, i, pshr32(uc!(x, i), shift));
     }
 }
 
@@ -77,8 +82,9 @@ fn norm_scaleup(x: &mut [i32], n: usize, shift: i32) {
     if shift <= 0 {
         return;
     }
+    debug_assert!(x.len() >= n);
     for i in 0..n {
-        x[i] = shl32(x[i], shift);
+        uc_set!(x, i, shl32(uc!(x, i), shift));
     }
 }
 

@@ -162,6 +162,7 @@ pub fn clt_mdct_backward(
     {
         let half_ov = (overlap >> 1) as usize;
         let input_len = input.len();
+        let full_input = input_len >= n2 as usize * stride;
         let mut xp1_idx: usize = 0; // walks forward by 2*stride
         let mut xp2_idx: usize = (n2 - 1) as usize; // walks backward
         // Note: xp1 and xp2 index into input[] with stride spacing
@@ -173,7 +174,9 @@ pub fn clt_mdct_backward(
             let idx1 = xp1_idx * stride;
             let idx2 = xp2_idx * stride;
             let x1 = shl32_ovflw(
-                if idx1 < input_len {
+                if full_input {
+                    uc!(input, idx1)
+                } else if idx1 < input_len {
                     uc!(input, idx1)
                 } else {
                     0
@@ -181,7 +184,9 @@ pub fn clt_mdct_backward(
                 pre_shift,
             );
             let x2 = shl32_ovflw(
-                if idx2 < input_len {
+                if full_input {
+                    uc!(input, idx2)
+                } else if idx2 < input_len {
                     uc!(input, idx2)
                 } else {
                     0
@@ -213,21 +218,14 @@ pub fn clt_mdct_backward(
         let half_ov = overlap >> 1;
         let fft_len = n4 as usize;
 
-        // Build a temporary KissFftCpx buffer from the output pairs
-        let mut fft_buf: Vec<KissFftCpx> = Vec::with_capacity(fft_len);
-        for j in 0..fft_len {
-            fft_buf.push(KissFftCpx {
-                r: uc!(output, half_ov + 2 * j),
-                i: uc!(output, half_ov + 2 * j + 1),
-            });
-        }
-
-        opus_fft_impl(st, &mut fft_buf, fft_shift);
-
-        for j in 0..fft_len {
-            uc_set!(output, half_ov + 2 * j, uc!(fft_buf, j).r);
-            uc_set!(output, half_ov + 2 * j + 1, uc!(fft_buf, j).i);
-        }
+        // The pre-rotation above has already filled
+        // output[half_ov .. half_ov + n2] with interleaved [yi, yr] pairs.
+        // KissFftCpx is repr(C) { i32, i32 }, so this range is a valid,
+        // sufficiently-aligned slice of n4 complex values; view it in place
+        // instead of allocating and copying a temporary per MDCT.
+        let fft_ptr = unsafe { output.as_mut_ptr().add(half_ov) }.cast::<KissFftCpx>();
+        let fft_buf = unsafe { std::slice::from_raw_parts_mut(fft_ptr, fft_len) };
+        opus_fft_impl(st, fft_buf, fft_shift);
     }
 
     // ---- Post-rotation and de-shuffle ----

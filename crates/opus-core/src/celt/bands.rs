@@ -14,6 +14,7 @@ use super::vq::{
     alg_quant, alg_unquant, celt_inner_prod_norm_shift, renormalise_vector, stereo_itheta,
 };
 use crate::types::*;
+use crate::{uc, uc_set};
 
 // ===========================================================================
 // Constants
@@ -449,10 +450,10 @@ fn stereo_merge(x: &mut [i32], y: &mut [i32], mid: i32, n: i32) {
     let kr = imax(7, kr);
 
     for j in 0..nu {
-        let l = mult32_32_q31(mid, x[j]);
-        let r = y[j];
-        x[j] = vshr32(mult32_32_q31(lgain, sub32(l, r)), kl - 15);
-        y[j] = vshr32(mult32_32_q31(rgain, add32(l, r)), kr - 15);
+        let l = mult32_32_q31(mid, uc!(x, j));
+        let r = uc!(y, j);
+        uc_set!(x, j, vshr32(mult32_32_q31(lgain, sub32(l, r)), kl - 15));
+        uc_set!(y, j, vshr32(mult32_32_q31(rgain, add32(l, r)), kr - 15));
     }
 }
 

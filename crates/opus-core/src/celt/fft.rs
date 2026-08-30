@@ -18,6 +18,12 @@ pub const MAXFACTORS: usize = 8;
 // =========================================================================
 
 /// Complex data sample (i32 components). Matches C `kiss_fft_cpx`.
+///
+/// `repr(C)` keeps the two-i32 layout identical to an interleaved `[i32; 2]`,
+/// which lets `clt_mdct_backward` view its interleaved output buffer as
+/// `KissFftCpx` in place instead of allocating and copying a temporary FFT
+/// buffer for every MDCT.
+#[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct KissFftCpx {
     pub r: i32,
