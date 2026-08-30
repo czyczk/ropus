@@ -807,18 +807,24 @@ impl<'a> RangeDecoder<'a> {
         let r = s >> ftb;
         let mut ret: i32 = -1;
         let mut t;
-        loop {
+        for &freq in icdf {
             t = s;
             ret += 1;
-            s = r * icdf[ret as usize] as u32;
+            s = r * freq as u32;
             if d >= s {
-                break;
+                self.val = d - s;
+                self.rng = t - s;
+                self.normalize();
+                return ret;
             }
         }
-        self.val = d - s;
-        self.rng = t - s;
-        self.normalize();
-        ret
+        // A corrupt stream can walk past the end of an iCDF table. The C
+        // reference reads out of bounds in that case; return an error state
+        // instead of panicking through slice indexing.
+        self.error = -1;
+        self.val = 0;
+        self.rng = 1;
+        0
     }
 
     /// Like `decode_icdf` but with 16-bit iCDF entries.
@@ -830,18 +836,21 @@ impl<'a> RangeDecoder<'a> {
         let r = s >> ftb;
         let mut ret: i32 = -1;
         let mut t;
-        loop {
+        for &freq in icdf {
             t = s;
             ret += 1;
-            s = r * icdf[ret as usize] as u32;
+            s = r * freq as u32;
             if d >= s {
-                break;
+                self.val = d - s;
+                self.rng = t - s;
+                self.normalize();
+                return ret;
             }
         }
-        self.val = d - s;
-        self.rng = t - s;
-        self.normalize();
-        ret
+        self.error = -1;
+        self.val = 0;
+        self.rng = 1;
+        0
     }
 
     /// Decodes a signed integer with a Laplace distribution anchored at zero.

@@ -438,10 +438,27 @@ pub(crate) fn silk_lpc_analysis_filter(
     d: usize,
 ) {
     for ix in d..len {
-        let mut out32_q12: u32 = (uc!(s, ix - 1) as i32 * uc!(a_q12, 0) as i32) as u32;
-        for j in 1..d {
+        let in_ptr = ix - 1;
+        let mut out32_q12: u32 = (uc!(s, in_ptr) as i32 * uc!(a_q12, 0) as i32) as u32;
+        // Match the C fixed-point kernel: handle the first six taps directly,
+        // then continue in pairs so the inner loop has half as many branches.
+        // `d` is normally 6..=MAX_LPC_ORDER and even; the bounds still handle
+        // the smaller test values.
+        let head = d.min(6);
+        for j in 1..head {
             out32_q12 =
-                out32_q12.wrapping_add((uc!(s, ix - 1 - j) as i32 * uc!(a_q12, j) as i32) as u32);
+                out32_q12.wrapping_add((uc!(s, in_ptr - j) as i32 * uc!(a_q12, j) as i32) as u32);
+        }
+        let mut j = head;
+        while j < d {
+            out32_q12 =
+                out32_q12.wrapping_add((uc!(s, in_ptr - j) as i32 * uc!(a_q12, j) as i32) as u32);
+            if j + 1 < d {
+                out32_q12 = out32_q12.wrapping_add(
+                    (uc!(s, in_ptr - (j + 1)) as i32 * uc!(a_q12, j + 1) as i32) as u32,
+                );
+            }
+            j += 2;
         }
         // Subtract prediction: s[ix]<<12 - accumulated, with wrapping
         let out32_q12 = ((uc!(s, ix) as i32 as u32) << 12).wrapping_sub(out32_q12) as i32;

@@ -67,6 +67,77 @@ The reference's own asm hints (`celt/x86/*`, `silk/x86/*`, `celt/arm/*`,
   byte-exact**, and SIMD/scalar outputs are byte-identical. AVX2 codegen does
   not change decoded samples.
 
+
+## Linux arm64 validation run (WSL2, Qualcomm, 12 cores)
+
+Reference built from the pinned libopus 1.6.1 tree (`22244de5a79bd1d6d623c32e72bf1954b56235be`)
+with CMake, using macro-equivalent configurations:
+
+- `fixed16`: `OPUS_FIXED_POINT=ON`, `OPUS_DISABLE_INTRINSICS=ON`,
+  `CMAKE_BUILD_TYPE=Release` — `FIXED_POINT=1`, no `ENABLE_RES24`, no
+  `OPUS_HAVE_RTCD` (matches the documented autotools oracle).
+- `prod`: default float/NEON build, ML options off.
+
+Results: **19/19 corpus cases bit-exact on f32/s16/s24 vs `fixed16`** for both
+default-SIMD and `--no-default-features` release builds, and SIMD/scalar
+outputs are byte-identical. `cargo test --workspace` passes in both feature
+configurations (1,667 core tests + wrapper tests with SIMD; 1,645 with scalar).
+
+### Process-level throughput vs fixed16 reference (default build)
+
+Official `scripts/bench-reference.py`, 21 iterations, pinned CPU, f32 to
+`/dev/null`:
+
+| case | Rust | reference | ratio |
+| --- | ---: | ---: | ---: |
+| music-a-celt-096k stereo | 41.3 ms | 35.0 ms | 1.180 |
+| speech-silk-012k mono | 13.5 ms | 9.5 ms | 1.417 |
+| speech-hybrid-032k mono | 24.8 ms | 19.7 ms | 1.260 |
+| speech-silk-dtx mono | 16.8 ms | 12.8 ms | 1.310 |
+| **mean** | | | **1.292** |
+
+Interleaved 41-run medians on the same pinned core gave mean **1.278**
+(CELT 1.178, SILK 1.419, hybrid 1.220, DTX 1.296). The first arm64 baseline
+on this machine was **1.548**; the work in this change recovers about 17%
+mean process time.
+
+Criterion decode-only, default arm64 build (20 samples):
+
+- celt-stereo-96k: 36.0 ms
+- silk-mono-12k: 9.84 ms
+- hybrid-mono-32k: 20.6 ms
+- silk-dtx-mono-12k: 13.1 ms
+
+Decode-only medians are close to or below the fixed16 reference process
+medians on the same machine; the remaining process-level gap is CLI output
+path/file-read overhead plus the stricter Rust safety checks in the hot SILK
+core. This is recorded as the current arm64 boundary, not as a CELT/SILK
+algorithm regression.
+
+### arm64 hotspot evidence (perf, armv8 PMU)
+
+`perf` was unpacked locally (`.refbuild/tools`) without touching the system.
+For `speech-silk-012k-20ms` the dominant cost is `silk_decode_core`
+(about 46% of sampled cycles), followed by the IIR/FIR resampler (~15%) and
+up2_HQ (~13%). Within `silk_decode_core`, the recursive LPC synthesis dot
+product and its gain/saturation output dominate.
+
+### arm64 optimizations applied
+
+- `deemphasis`: dedicated stereo/no-downsample path matching C's
+  `deemphasis_stereo_simple`.
+- CLI: per-call PCM scratch buffers are reused instead of zero-allocated per
+  packet; output capacity is pre-reserved from the encoded stream size;
+  sample conversion uses iterator-based bulk byte extension. The CLI now also
+  has a `simd` feature so `--no-default-features` actually builds the scalar
+  decoder (previously the dependency's default feature was silently kept).
+- SILK core: stack-backed working buffers replace per-frame/subframe `Vec`
+  allocations; C-style unrolled LTP/LPC kernels; unchecked hot resampler FIR
+  reads with proven bounds; explicit aarch64 NEON dot-product kernels for the
+  recursive LPC and LTP synthesis filters (gated by `feature = "simd"` and
+  bit-exact on all 19 corpus cases).
+- Range coder: iterator-based iCDF walk removes per-symbol bounds checks and
+  turns table overrun into an error state instead of a panic.
 ## wasm: root cause of the earlier "negative optimization"
 
 The earlier finding was measurement noise plus a real configuration bug:
@@ -105,8 +176,9 @@ their SILK timings are equal within noise, as expected.
 
 ## Known optimization boundaries
 
-- Explicit hand-written AVX/NEON intrinsics beyond LLVM auto-vectorization and
-  the `wide` kernels remain future work.
+- Explicit hand-written AVX intrinsics and further CELT NEON kernels remain
+  future work. The SILK LPC/LTP recursive filters now have explicit aarch64
+  NEON kernels; the x86-64 path still relies on `wide`/LLVM.
 - Browser engine variance matters: decisions should use the Node harness and,
   when possible, SpiderMonkey as a second data point.
 - wasm32-wasip1 CLI under wasmtime: all 19 corpus cases byte-identical to

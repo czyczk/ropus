@@ -10,6 +10,7 @@ use crate::celt::range_coder::RangeDecoder;
 use crate::silk::common::*;
 use crate::silk::tables::*;
 use crate::types::*;
+use crate::uc;
 
 // ===========================================================================
 // DNN PLC argument type
@@ -847,6 +848,91 @@ fn silk_decode_parameters(
 // Inverse NSQ: decode_core
 // ===========================================================================
 
+/// NEON dot-product for one SILK LPC synthesis sample. The synthesis filter
+/// is recursive (each sample updates the state used by the next sample), so
+/// the four-way vectorisation is across filter taps within one sample rather
+/// than across output samples.
+#[cfg(all(target_arch = "aarch64", feature = "simd"))]
+#[inline(always)]
+fn silk_lpc_synth_pred_neon_one(
+    state: &[i32],
+    a_q12: &[i16],
+    order: usize,
+    bias: i32,
+    i: usize,
+) -> i32 {
+    use std::arch::aarch64::*;
+    debug_assert!(order == MIN_LPC_ORDER || order == MAX_LPC_ORDER);
+
+    unsafe {
+        let mut sum0 = vdupq_n_s64(0);
+        let mut sum1 = vdupq_n_s64(0);
+        let mut j = 0usize;
+        macro_rules! tap4 {
+            () => {{
+                let ptr = state.as_ptr().add(MAX_LPC_ORDER + i - 1 - j - 3);
+                let sv = vld1q_s32(ptr);
+                let rev = vrev64q_s32(sv);
+                let rev = vextq_s32(rev, rev, 2);
+                let cv = vmovl_s16(vld1_s16(a_q12.as_ptr().add(j)));
+                sum0 = vaddq_s64(
+                    sum0,
+                    vshrq_n_s64(vmull_s32(vget_low_s32(rev), vget_low_s32(cv)), 16),
+                );
+                sum1 = vaddq_s64(
+                    sum1,
+                    vshrq_n_s64(vmull_s32(vget_high_s32(rev), vget_high_s32(cv)), 16),
+                );
+                j += 4;
+            }};
+        }
+        if order == MAX_LPC_ORDER {
+            tap4!();
+            tap4!();
+            tap4!();
+            tap4!();
+        } else {
+            tap4!();
+            tap4!();
+        }
+
+        let mut sum = i64::from(bias)
+            + vgetq_lane_s64(sum0, 0)
+            + vgetq_lane_s64(sum0, 1)
+            + vgetq_lane_s64(sum1, 0)
+            + vgetq_lane_s64(sum1, 1);
+        while j < order {
+            let idx = MAX_LPC_ORDER + i - 1 - j;
+            sum += (state[idx] as i64 * a_q12[j] as i64) >> 16;
+            j += 1;
+        }
+        sum as i32
+    }
+}
+
+/// NEON dot-product for one voiced SILK LTP prediction sample (5 taps).
+/// LTP state is also recursive, so vectorisation stays within one sample.
+#[cfg(all(target_arch = "aarch64", feature = "simd"))]
+#[inline(always)]
+fn silk_ltp_pred_neon_one(state: &[i32], b_q14: &[i16], pred_base: i64) -> i32 {
+    use std::arch::aarch64::*;
+    unsafe {
+        let p = pred_base as usize;
+        let sv = vld1q_s32(state.as_ptr().add(p - 3));
+        let rev = vrev64q_s32(sv);
+        let rev = vextq_s32(rev, rev, 2);
+        let cv = vmovl_s16(vld1_s16(b_q14.as_ptr()));
+        let lo = vshrq_n_s64(vmull_s32(vget_low_s32(rev), vget_low_s32(cv)), 16);
+        let hi = vshrq_n_s64(vmull_s32(vget_high_s32(rev), vget_high_s32(cv)), 16);
+        let mut sum = vgetq_lane_s64(lo, 0)
+            + vgetq_lane_s64(lo, 1)
+            + vgetq_lane_s64(hi, 0)
+            + vgetq_lane_s64(hi, 1);
+        sum += ((state[p - 4] as i64 * b_q14[4] as i64) >> 16) as i64;
+        sum as i32
+    }
+}
+
 fn silk_decode_core(
     dec: &mut SilkDecoderState,
     dec_ctrl: &SilkDecoderControl,
@@ -891,16 +977,26 @@ fn silk_decode_core(
         dec.exc_q14[i] = exc_val;
     }
 
-    // Step 2: Copy previous LPC state to working buffer
-    let mut s_lpc_q14 = vec![0i32; subfr_length + MAX_LPC_ORDER];
+    // Step 2: Copy previous LPC state to working buffer. The C reference uses
+    // stack VLAs here; fixed-size backing arrays plus exact-length slices avoid
+    // a heap allocation on every frame/subframe (SILK can decode hundreds of
+    // frames per second).
+    let lpc_len = subfr_length + MAX_LPC_ORDER;
+    let mut s_lpc_q14_storage = [0i32; MAX_SUB_FRAME_LENGTH + MAX_LPC_ORDER];
+    let s_lpc_q14 = &mut s_lpc_q14_storage[..lpc_len];
     s_lpc_q14[..MAX_LPC_ORDER].copy_from_slice(&dec.s_lpc_q14_buf);
 
-    // Allocate sLTP buffers for voiced frames
-    let mut s_ltp = vec![0i16; ltp_mem_length + frame_length];
-    let mut s_ltp_q15 = vec![0i32; ltp_mem_length + frame_length];
+    // Allocate sLTP buffers for voiced frames. Worst case at fs_khz=16:
+    // ltp_mem_length == frame_length == MAX_FRAME_LENGTH.
+    let ltp_len = ltp_mem_length + frame_length;
+    let mut s_ltp_storage = [0i16; 2 * MAX_FRAME_LENGTH];
+    let mut s_ltp_q15_storage = [0i32; 2 * MAX_FRAME_LENGTH];
+    let s_ltp = &mut s_ltp_storage[..ltp_len];
+    let s_ltp_q15 = &mut s_ltp_q15_storage[..ltp_len];
     let mut s_ltp_buf_idx = ltp_mem_length;
 
     let mut prev_gain_q16 = dec.prev_gain_q16;
+    let mut res_q14_storage = [0i32; MAX_SUB_FRAME_LENGTH];
 
     // Step 3: Main subframe loop
     let mut exc_offset = 0;
@@ -947,8 +1043,8 @@ fn silk_decode_core(
 
         let b_q14 = &dec_ctrl_mut.ltp_coef_q14[k * LTP_ORDER..(k + 1) * LTP_ORDER];
 
-        // Allocate residual buffer
-        let mut res_q14 = vec![0i32; subfr_length];
+        // Reuse one residual buffer for all subframes.
+        let res_q14 = &mut res_q14_storage[..subfr_length];
 
         if local_signal_type == TYPE_VOICED {
             let lag = dec_ctrl_mut.pitch_l[k];
@@ -977,33 +1073,15 @@ fn silk_decode_core(
                 // The function sets output[0..d-1] = 0 and for ix in d..len: out[ix] = in[ix] - sum(B[j]*in[ix-1-j])
                 // Here d = lpc_order, len = ltp_mem_length - start_idx
                 let filter_len = ltp_mem_length - start_idx;
-                // First d samples are zero
-                for i in start_idx..start_idx + lpc_order.min(filter_len) {
-                    s_ltp[i] = 0;
-                }
-                for ix in lpc_order..filter_len {
-                    let i = start_idx + ix;
-                    let in_i = i + in_offset;
-                    let mut out32_q12: i32 = 0;
-                    for j in 0..lpc_order {
-                        let in_idx = in_i as i64 - 1 - j as i64;
-                        if in_idx >= 0 && (in_idx as usize) < dec.out_buf.len() {
-                            // silk_SMLABB_ovflw: wrapping multiply-add of two i16 values
-                            out32_q12 = out32_q12.wrapping_add(
-                                dec.out_buf[in_idx as usize] as i32 * a_q12[j] as i32,
-                            );
-                        }
-                    }
-                    let in_val = if in_i < dec.out_buf.len() {
-                        dec.out_buf[in_i] as i32
-                    } else {
-                        0
-                    };
-                    // out = in[ix] * (1<<12) - prediction, then >> 12 with rounding, then sat16
-                    let out32_q12 = (in_val << 12).wrapping_sub(out32_q12);
-                    let out32 = silk_rshift_round(out32_q12, 12);
-                    s_ltp[i] = sat16(out32);
-                }
+                let out_start = start_idx;
+                let in_start = start_idx + in_offset;
+                silk_lpc_analysis_filter(
+                    &mut s_ltp[out_start..out_start + filter_len],
+                    &dec.out_buf[in_start..in_start + filter_len],
+                    a_q12,
+                    filter_len,
+                    lpc_order,
+                );
 
                 // Scale sLTP → sLTP_Q15 using inv_gain
                 if k == 0 {
@@ -1036,15 +1114,46 @@ fn silk_decode_core(
 
             // LTP synthesis
             for i in 0..subfr_length {
-                // 5-tap FIR LTP filter
+                // 5-tap FIR LTP filter. The C reference uses a fully unrolled
+                // silk_SMLAWB chain with no per-tap bounds tests; take that
+                // fast path whenever the whole [-2, +2] window is in range and
+                // keep the checked loop as a malformed-input fallback.
+                let pred_base = s_ltp_buf_idx as i64 - lag as i64 + (LTP_ORDER / 2) as i64;
                 let mut ltp_pred_q13: i32 = 2; // Rounding bias
-                let pred_base = s_ltp_buf_idx as i64 - lag as i64 + LTP_ORDER as i64 / 2;
-                for j in 0..LTP_ORDER {
-                    let idx = pred_base - j as i64;
-                    if idx >= 0 && (idx as usize) < s_ltp_q15.len() {
-                        ltp_pred_q13 = (ltp_pred_q13 as i64
-                            + ((s_ltp_q15[idx as usize] as i64 * b_q14[j] as i64) >> 16))
-                            as i32;
+                if pred_base >= (LTP_ORDER - 1) as i64 && (pred_base as usize) < s_ltp_q15.len() {
+                    #[cfg(all(target_arch = "aarch64", feature = "simd"))]
+                    {
+                        let sum = silk_ltp_pred_neon_one(&s_ltp_q15, b_q14, pred_base);
+                        ltp_pred_q13 = ltp_pred_q13.wrapping_add(sum);
+                    }
+                    #[cfg(not(all(target_arch = "aarch64", feature = "simd")))]
+                    {
+                        let p = pred_base as usize;
+                        let t0 = ((uc!(s_ltp_q15, p) as i64 * uc!(b_q14, 0) as i64) >> 16) as i32;
+                        let t1 =
+                            ((uc!(s_ltp_q15, p - 1) as i64 * uc!(b_q14, 1) as i64) >> 16) as i32;
+                        let t2 =
+                            ((uc!(s_ltp_q15, p - 2) as i64 * uc!(b_q14, 2) as i64) >> 16) as i32;
+                        let t3 =
+                            ((uc!(s_ltp_q15, p - 3) as i64 * uc!(b_q14, 3) as i64) >> 16) as i32;
+                        let t4 =
+                            ((uc!(s_ltp_q15, p - 4) as i64 * uc!(b_q14, 4) as i64) >> 16) as i32;
+                        // Wrapping addition is associative modulo 2^32, so this
+                        // balanced tree is bit-identical to C's sequential
+                        // silk_SMLAWB chain while exposing more ILP.
+                        let s01 = t0.wrapping_add(t1);
+                        let s23 = t2.wrapping_add(t3);
+                        let sum = s01.wrapping_add(s23).wrapping_add(t4);
+                        ltp_pred_q13 = ltp_pred_q13.wrapping_add(sum);
+                    }
+                } else {
+                    for j in 0..LTP_ORDER {
+                        let idx = pred_base - j as i64;
+                        if idx >= 0 && (idx as usize) < s_ltp_q15.len() {
+                            ltp_pred_q13 = (ltp_pred_q13 as i64
+                                + ((s_ltp_q15[idx as usize] as i64 * b_q14[j] as i64) >> 16))
+                                as i32;
+                        }
                     }
                 }
 
@@ -1065,13 +1174,66 @@ fn silk_decode_core(
 
         // LPC synthesis
         for i in 0..subfr_length {
-            // LPC prediction with rounding bias
+            // LPC prediction with rounding bias. C hard-unrolls the common
+            // SILK orders (10 and 16); keep the generic checked loop only for
+            // unexpected orders.
             let mut lpc_pred_q10: i32 = (lpc_order >> 1) as i32;
-            for j in 0..lpc_order {
-                let idx = MAX_LPC_ORDER + i - j - 1;
-                lpc_pred_q10 = (lpc_pred_q10 as i64
-                    + ((s_lpc_q14[idx] as i64 * a_q12[j] as i64) >> 16))
-                    as i32;
+            #[cfg(all(target_arch = "aarch64", feature = "simd"))]
+            {
+                lpc_pred_q10 =
+                    silk_lpc_synth_pred_neon_one(&s_lpc_q14, a_q12, lpc_order, lpc_pred_q10, i);
+            }
+            #[cfg(not(all(target_arch = "aarch64", feature = "simd")))]
+            if lpc_order == MIN_LPC_ORDER || lpc_order == MAX_LPC_ORDER {
+                let base = MAX_LPC_ORDER + i;
+                let t0 = ((uc!(s_lpc_q14, base - 1) as i64 * uc!(a_q12, 0) as i64) >> 16) as i32;
+                let t1 = ((uc!(s_lpc_q14, base - 2) as i64 * uc!(a_q12, 1) as i64) >> 16) as i32;
+                let t2 = ((uc!(s_lpc_q14, base - 3) as i64 * uc!(a_q12, 2) as i64) >> 16) as i32;
+                let t3 = ((uc!(s_lpc_q14, base - 4) as i64 * uc!(a_q12, 3) as i64) >> 16) as i32;
+                let t4 = ((uc!(s_lpc_q14, base - 5) as i64 * uc!(a_q12, 4) as i64) >> 16) as i32;
+                let t5 = ((uc!(s_lpc_q14, base - 6) as i64 * uc!(a_q12, 5) as i64) >> 16) as i32;
+                let t6 = ((uc!(s_lpc_q14, base - 7) as i64 * uc!(a_q12, 6) as i64) >> 16) as i32;
+                let t7 = ((uc!(s_lpc_q14, base - 8) as i64 * uc!(a_q12, 7) as i64) >> 16) as i32;
+                let t8 = ((uc!(s_lpc_q14, base - 9) as i64 * uc!(a_q12, 8) as i64) >> 16) as i32;
+                let t9 = ((uc!(s_lpc_q14, base - 10) as i64 * uc!(a_q12, 9) as i64) >> 16) as i32;
+                // Wrapping addition is associative modulo 2^32, so the
+                // balanced tree below matches the C silk_SMLAWB chain
+                // bit-for-bit while exposing more ILP.
+                let s01 = t0.wrapping_add(t1);
+                let s23 = t2.wrapping_add(t3);
+                let s45 = t4.wrapping_add(t5);
+                let s67 = t6.wrapping_add(t7);
+                let s89 = t8.wrapping_add(t9);
+                let s0123 = s01.wrapping_add(s23);
+                let s4567 = s45.wrapping_add(s67);
+                let mut sum = s0123.wrapping_add(s4567).wrapping_add(s89);
+                if lpc_order == MAX_LPC_ORDER {
+                    let t10 =
+                        ((uc!(s_lpc_q14, base - 11) as i64 * uc!(a_q12, 10) as i64) >> 16) as i32;
+                    let t11 =
+                        ((uc!(s_lpc_q14, base - 12) as i64 * uc!(a_q12, 11) as i64) >> 16) as i32;
+                    let t12 =
+                        ((uc!(s_lpc_q14, base - 13) as i64 * uc!(a_q12, 12) as i64) >> 16) as i32;
+                    let t13 =
+                        ((uc!(s_lpc_q14, base - 14) as i64 * uc!(a_q12, 13) as i64) >> 16) as i32;
+                    let t14 =
+                        ((uc!(s_lpc_q14, base - 15) as i64 * uc!(a_q12, 14) as i64) >> 16) as i32;
+                    let t15 =
+                        ((uc!(s_lpc_q14, base - 16) as i64 * uc!(a_q12, 15) as i64) >> 16) as i32;
+                    let s10_11 = t10.wrapping_add(t11);
+                    let s12_13 = t12.wrapping_add(t13);
+                    let s14_15 = t14.wrapping_add(t15);
+                    let extra = s10_11.wrapping_add(s12_13).wrapping_add(s14_15);
+                    sum = sum.wrapping_add(extra);
+                }
+                lpc_pred_q10 = lpc_pred_q10.wrapping_add(sum);
+            } else {
+                for j in 0..lpc_order {
+                    let idx = MAX_LPC_ORDER + i - j - 1;
+                    lpc_pred_q10 = (lpc_pred_q10 as i64
+                        + ((s_lpc_q14[idx] as i64 * a_q12[j] as i64) >> 16))
+                        as i32;
+                }
             }
 
             // Combine residual with prediction
@@ -1995,6 +2157,12 @@ fn silk_resampler_private_down_fir_interpol(
     out_idx - out_offset
 }
 
+/// Worst-case resampler batch size: 10 ms at 48 kHz internal rate.
+const RESAMPLER_MAX_BATCH_SIZE: usize = 480;
+
+/// Worst-case SILK frame length at the 48 kHz Opus API rate.
+const MAX_API_FRAME_LENGTH: usize = MAX_FRAME_LENGTH * 3; // 20 ms at 48 kHz
+
 /// Polyphase FIR downsampler. Matches C: `silk_resampler_private_down_FIR`.
 fn silk_resampler_private_down_fir(
     s: &mut SilkResamplerState,
@@ -2010,7 +2178,9 @@ fn silk_resampler_private_down_fir(
     let ar2_coefs = &all_coefs[..2];
     let fir_coefs = &all_coefs[2..];
 
-    let mut buf = vec![0i32; batch_size as usize + fir_order];
+    let buf_len = batch_size as usize + fir_order;
+    let mut buf_storage = [0i32; RESAMPLER_MAX_BATCH_SIZE + SILK_RESAMPLER_MAX_FIR_ORDER];
+    let buf = &mut buf_storage[..buf_len];
 
     // Copy FIR state to start of buffer
     buf[..fir_order].copy_from_slice(&s.s_fir_i32[..fir_order]);
@@ -2079,7 +2249,9 @@ fn silk_resampler_private_iir_fir(
     let batch_size = s.batch_size as i32;
     let index_increment_q16 = s.inv_ratio_q16;
 
-    let mut buf = vec![0i16; 2 * batch_size as usize + RESAMPLER_ORDER_FIR_12];
+    let buf_len = 2 * batch_size as usize + RESAMPLER_ORDER_FIR_12;
+    let mut buf_storage = [0i16; 2 * RESAMPLER_MAX_BATCH_SIZE + RESAMPLER_ORDER_FIR_12];
+    let buf = &mut buf_storage[..buf_len];
 
     // Copy FIR state (i16) to start of buffer
     buf[..RESAMPLER_ORDER_FIR_12].copy_from_slice(&s.s_fir_i16[..RESAMPLER_ORDER_FIR_12]);
@@ -2109,21 +2281,25 @@ fn silk_resampler_private_iir_fir(
             let table_index = smulwb(index_q16 & 0xFFFF, 12) as usize;
             let buf_idx = (index_q16 >> 16) as usize;
 
+            // The iCDF walk stays below 2*n_samples_in and n_samples_in
+            // <= batch_size, so buf_idx+7 is always inside `buf`. Unsafe
+            // reads remove the per-tap bounds checks while preserving the
+            // C reference's unchecked table access.
             let mut res_q15 =
-                (buf[buf_idx] as i32) * (SILK_RESAMPLER_FRAC_FIR_12[table_index][0] as i32);
-            res_q15 +=
-                (buf[buf_idx + 1] as i32) * (SILK_RESAMPLER_FRAC_FIR_12[table_index][1] as i32);
-            res_q15 +=
-                (buf[buf_idx + 2] as i32) * (SILK_RESAMPLER_FRAC_FIR_12[table_index][2] as i32);
-            res_q15 +=
-                (buf[buf_idx + 3] as i32) * (SILK_RESAMPLER_FRAC_FIR_12[table_index][3] as i32);
-            res_q15 += (buf[buf_idx + 4] as i32)
+                (uc!(buf, buf_idx) as i32) * (SILK_RESAMPLER_FRAC_FIR_12[table_index][0] as i32);
+            res_q15 += (uc!(buf, buf_idx + 1) as i32)
+                * (SILK_RESAMPLER_FRAC_FIR_12[table_index][1] as i32);
+            res_q15 += (uc!(buf, buf_idx + 2) as i32)
+                * (SILK_RESAMPLER_FRAC_FIR_12[table_index][2] as i32);
+            res_q15 += (uc!(buf, buf_idx + 3) as i32)
+                * (SILK_RESAMPLER_FRAC_FIR_12[table_index][3] as i32);
+            res_q15 += (uc!(buf, buf_idx + 4) as i32)
                 * (SILK_RESAMPLER_FRAC_FIR_12[11 - table_index][3] as i32);
-            res_q15 += (buf[buf_idx + 5] as i32)
+            res_q15 += (uc!(buf, buf_idx + 5) as i32)
                 * (SILK_RESAMPLER_FRAC_FIR_12[11 - table_index][2] as i32);
-            res_q15 += (buf[buf_idx + 6] as i32)
+            res_q15 += (uc!(buf, buf_idx + 6) as i32)
                 * (SILK_RESAMPLER_FRAC_FIR_12[11 - table_index][1] as i32);
-            res_q15 += (buf[buf_idx + 7] as i32)
+            res_q15 += (uc!(buf, buf_idx + 7) as i32)
                 * (SILK_RESAMPLER_FRAC_FIR_12[11 - table_index][0] as i32);
 
             if out_ptr < out.len() {
@@ -2287,10 +2463,14 @@ pub fn silk_decode_frame(
         // Normal decode or LBRR with flag set
         let mut dec_ctrl = SilkDecoderControl::default();
 
-        // Allocate pulse buffer (rounded up to shell codec frame)
+        // Allocate pulse buffer (rounded up to shell codec frame). SILK frame
+        // lengths are multiples of the shell-codec frame length and never
+        // exceed MAX_FRAME_LENGTH, so a fixed backing array avoids a per-frame
+        // heap allocation while keeping an exact-length slice.
         let pulse_len =
             (frame_length + SHELL_CODEC_FRAME_LENGTH - 1) & !(SHELL_CODEC_FRAME_LENGTH - 1);
-        let mut pulses = vec![0i16; pulse_len];
+        let mut pulses_storage = [0i16; MAX_FRAME_LENGTH];
+        let pulses = &mut pulses_storage[..pulse_len];
 
         // Decode indices
         silk_decode_indices(
@@ -2304,7 +2484,7 @@ pub fn silk_decode_frame(
         // Decode pulses
         silk_decode_pulses(
             rc,
-            &mut pulses,
+            pulses,
             dec.indices.signal_type as i32,
             dec.indices.quant_offset_type as i32,
             frame_length,
@@ -2675,7 +2855,7 @@ pub fn silk_decode(
     let frame_length = decoder.channel_state[0].frame_length;
 
     // Per-channel decoding
-    let mut samples_out1_tmp = vec![vec![0i16; frame_length + 2]; n_channels_internal];
+    let mut samples_out1_storage = [[0i16; MAX_FRAME_LENGTH + 2]; 2];
 
     // Propagate the caller's deep-PLC preference into each channel's PLC
     // state so `silk_decode_frame` can gate neural concealment locally.
@@ -2715,7 +2895,7 @@ pub fn silk_decode(
             silk_decode_frame(
                 &mut decoder.channel_state[n],
                 rc,
-                &mut samples_out1_tmp[n][2..frame_length + 2],
+                &mut samples_out1_storage[n][2..frame_length + 2],
                 &mut n_out,
                 lost_flag,
                 cond,
@@ -2723,18 +2903,18 @@ pub fn silk_decode(
             );
             decoder.channel_state[n].n_frames_decoded += 1;
         } else {
-            samples_out1_tmp[n][2..frame_length + 2].fill(0);
+            samples_out1_storage[n][2..frame_length + 2].fill(0);
             decoder.channel_state[n].n_frames_decoded += 1;
         }
     }
 
     // Stereo M/S → L/R, or mono buffering
     if n_channels_internal == 2 && dec_control.n_channels_api == 2 {
-        let (left, right) = samples_out1_tmp.split_at_mut(1);
+        let (left, right) = samples_out1_storage.split_at_mut(1);
         silk_stereo_ms_to_lr(
             &mut decoder.s_stereo,
-            &mut left[0],
-            &mut right[0],
+            &mut left[0][..frame_length + 2],
+            &mut right[0][..frame_length + 2],
             &ms_pred_q13,
             decoder.channel_state[0].fs_khz,
             frame_length,
@@ -2744,11 +2924,11 @@ pub fn silk_decode(
         // Matches C: silk_memcpy(samplesOut1_tmp[0], psDec->sStereo.sMid, 2)
         //            silk_memcpy(psDec->sStereo.sMid, &samplesOut1_tmp[0][nSamplesOutDec], 2)
         let new_s_mid = [
-            samples_out1_tmp[0][frame_length],
-            samples_out1_tmp[0][frame_length + 1],
+            samples_out1_storage[0][frame_length],
+            samples_out1_storage[0][frame_length + 1],
         ];
-        samples_out1_tmp[0][0] = decoder.s_stereo.s_mid[0];
-        samples_out1_tmp[0][1] = decoder.s_stereo.s_mid[1];
+        samples_out1_storage[0][0] = decoder.s_stereo.s_mid[0];
+        samples_out1_storage[0][1] = decoder.s_stereo.s_mid[1];
         decoder.s_stereo.s_mid = new_s_mid;
     }
 
@@ -2762,11 +2942,12 @@ pub fn silk_decode(
     // The [1] offset gives the resampler 1 sample of sMid history as lookback.
     let n_api_ch = dec_control.n_channels_api.min(n_channels_internal);
     for n in 0..n_api_ch {
-        let mut resampled = vec![0i16; out_samples];
+        let mut resampled_storage = [0i16; MAX_API_FRAME_LENGTH];
+        let resampled = &mut resampled_storage[..out_samples];
         silk_resampler(
             &mut decoder.channel_state[n].resampler_state,
-            &mut resampled,
-            &samples_out1_tmp[n][1..frame_length + 1],
+            resampled,
+            &samples_out1_storage[n][1..frame_length + 1],
             frame_length,
         );
 

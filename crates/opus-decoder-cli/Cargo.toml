@@ -14,4 +14,8 @@ path = "src/main.rs"
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 ogg = "0.9"
-opus-decoder = { path = "../opus-decoder" }
+opus-decoder = { path = "../opus-decoder", default-features = false }
+
+[features]
+default = ["simd"]
+simd = ["opus-decoder/simd"]

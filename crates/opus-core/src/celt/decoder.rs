@@ -331,6 +331,28 @@ fn deemphasis(
     let coef0 = coef[0];
     let nd = n / downsample;
 
+    // Common stereo/no-downsample/no-accumulation case, matching C's
+    // `deemphasis_stereo_simple`. Keeping both channels in one loop gives
+    // contiguous interleaved stores and shortens the per-sample dependency
+    // bookkeeping; the generic path below handles the remaining modes.
+    if downsample == 1 && cc == 2 && !accum {
+        let x0 = inp[0];
+        let x1 = inp[1];
+        let mut m0 = mem[0];
+        let mut m1 = mem[1];
+        for j in 0..n as usize {
+            let tmp0 = saturate(x0[j] + VERY_SMALL + m0, SIG_SAT);
+            let tmp1 = saturate(x1[j] + VERY_SMALL + m1, SIG_SAT);
+            m0 = mult16_32_q15(coef0, tmp0);
+            m1 = mult16_32_q15(coef0, tmp1);
+            pcm[j * 2] = sig2word16(tmp0) as i16;
+            pcm[j * 2 + 1] = sig2word16(tmp1) as i16;
+        }
+        mem[0] = m0;
+        mem[1] = m1;
+        return;
+    }
+
     for c in 0..cc as usize {
         let x = inp[c];
         let mut m = mem[c];

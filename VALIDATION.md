@@ -31,6 +31,24 @@ only bitstreams are committed.
   deltas are stored in `.refbuild/validation-report.json` after each run. This
   is the expected fixed-vs-float precision floor, not a CELT algorithm bug.
 
+
+## Linux arm64 run (this session)
+
+The same corpus was re-validated on Linux arm64 (WSL2, Qualcomm) against a
+locally pinned clean export of libopus commit
+`22244de5a79bd1d6d623c32e72bf1954b56235be`. Autotools were not available, so
+the two reference decoders were built out-of-tree with CMake using the
+macro-equivalent configurations recorded in `PERFORMANCE.md`.
+
+- default (`simd`) release: **19/19 bit-exact** on f32/s16/s24 vs `fixed16`.
+- `--no-default-features` release: **19/19 bit-exact** on f32/s16/s24 vs
+  `fixed16`.
+- SIMD/scalar f32, s16, and s24 outputs are byte-identical for every case.
+- SILK cases remain bit-exact vs the default float/NEON `prod` reference;
+  CELT/hybrid prod differences are the documented fixed-vs-float precision
+  floor.
+- `cargo test --workspace`: 1,667 core tests + wrapper/doc tests with `simd`,
+  1,645 core tests + wrapper/doc tests without.
 ## DTX comfort-noise tail: resolved
 
 The adopted ropus base had a SILK PLC/DTX drift that produced 565 differing

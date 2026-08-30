@@ -134,6 +134,22 @@ fn bytes_per_sample(format: SampleFormat) -> usize {
     }
 }
 
+/// Reserve a rough initial output capacity from the encoded stream size.
+///
+/// Output/input byte ratios vary with bitrate (f32 mono at 48 kHz can exceed
+/// 200:1 at the 6 kb/s minimum), so this is intentionally a floor, not an
+/// exact bound. The cap keeps pathological overallocation bounded.
+fn initial_output_capacity(format: SampleFormat, input_bytes: u64) -> usize {
+    let ratio = match format {
+        SampleFormat::S16 => 96,
+        SampleFormat::S24 => 144,
+        SampleFormat::F32 => 192,
+    };
+    usize::try_from(input_bytes.saturating_mul(ratio))
+        .unwrap_or(usize::MAX)
+        .min(64 * 1024 * 1024)
+}
+
 fn decode_raw_demo(args: &Args, mut input: File) -> Result<DecodedAudio> {
     let channels = match args.channels {
         Some(1) => Channels::Mono,
@@ -147,9 +163,15 @@ fn decode_raw_demo(args: &Args, mut input: File) -> Result<DecodedAudio> {
     };
     let mut decoder = new_decoder(args, channels)?;
     let mut decoded = Vec::<u8>::new();
+    if let Ok(meta) = input.metadata() {
+        decoded.reserve(initial_output_capacity(args.sample_format, meta.len()));
+    }
     let mut header = [0u8; 8];
     let mut payload = Vec::new();
     let mut packet_index = 0u64;
+    let interleaved = MAX_FRAME_SAMPLES_PER_CHANNEL * channels.count();
+    let mut pcm_i32 = vec![0i32; interleaved];
+    let mut pcm_f32 = vec![0f32; interleaved];
 
     loop {
         match input.read_exact(&mut header) {
@@ -177,6 +199,8 @@ fn decode_raw_demo(args: &Args, mut input: File) -> Result<DecodedAudio> {
             &payload,
             channels,
             &mut decoded,
+            &mut pcm_i32,
+            &mut pcm_f32,
         )
         .with_context(|| format!("decoding packet {packet_index} failed"))?;
     }
@@ -196,6 +220,10 @@ fn decode_raw_demo(args: &Args, mut input: File) -> Result<DecodedAudio> {
 }
 
 fn decode_ogg(args: &Args, file: File) -> Result<DecodedAudio> {
+    let initial_capacity = file
+        .metadata()
+        .map(|m| initial_output_capacity(args.sample_format, m.len()))
+        .unwrap_or(0);
     if args.rate != 48000 {
         return Err(anyhow!(
             "Ogg input currently requires --rate 48000 (resampling is not implemented yet)"
@@ -244,9 +272,12 @@ fn decode_ogg(args: &Args, file: File) -> Result<DecodedAudio> {
             .context("applying OpusHead output gain")?;
     }
 
-    let mut decoded = Vec::<u8>::new();
+    let mut decoded = Vec::<u8>::with_capacity(initial_capacity);
     let mut packet_index = 0u64;
     let mut last_granule = 0u64;
+    let interleaved = MAX_FRAME_SAMPLES_PER_CHANNEL * channels.count();
+    let mut pcm_i32 = vec![0i32; interleaved];
+    let mut pcm_f32 = vec![0f32; interleaved];
     loop {
         let packet = reader.read_packet().context("failed reading Ogg packets")?;
         let Some(packet) = packet else { break };
@@ -258,6 +289,8 @@ fn decode_ogg(args: &Args, file: File) -> Result<DecodedAudio> {
             &packet.data,
             channels,
             &mut decoded,
+            &mut pcm_i32,
+            &mut pcm_f32,
         )
         .with_context(|| format!("decoding Ogg packet {packet_index} failed"))?;
     }
@@ -314,33 +347,40 @@ fn decode_packet(
     payload: &[u8],
     channels: Channels,
     out: &mut Vec<u8>,
+    pcm_i32: &mut [i32],
+    pcm_f32: &mut [f32],
 ) -> Result<()> {
-    let interleaved = MAX_FRAME_SAMPLES_PER_CHANNEL * channels.count();
     match format {
         SampleFormat::S16 => {
             // Match `opus_demo -16`, which decodes through the 24-bit path and
             // rounds/saturates back to s16 (this clamps -2^23 to -32767).
-            let mut pcm = vec![0i32; interleaved];
-            let n = decoder.decode24(Some(payload), &mut pcm, DecodeMode::Normal)?;
-            for s in &pcm[..n * channels.count()] {
-                let s = pcm::i24_to_s16(*s);
-                out.extend_from_slice(&s.to_le_bytes());
-            }
+            let n = decoder.decode24(Some(payload), pcm_i32, DecodeMode::Normal)?;
+            out.extend(
+                pcm_i32[..n * channels.count()]
+                    .iter()
+                    .map(|s| pcm::i24_to_s16(*s))
+                    .flat_map(|s| s.to_le_bytes()),
+            );
         }
         SampleFormat::S24 => {
-            let mut pcm = vec![0i32; interleaved];
-            let n = decoder.decode24(Some(payload), &mut pcm, DecodeMode::Normal)?;
-            for s in &pcm[..n * channels.count()] {
-                let s = pcm::i24_to_s24(*s);
-                out.extend_from_slice(&s.to_le_bytes()[..3]);
-            }
+            let n = decoder.decode24(Some(payload), pcm_i32, DecodeMode::Normal)?;
+            out.extend(
+                pcm_i32[..n * channels.count()]
+                    .iter()
+                    .map(|s| pcm::i24_to_s24(*s))
+                    .flat_map(|s| {
+                        let b = s.to_le_bytes();
+                        [b[0], b[1], b[2]]
+                    }),
+            );
         }
         SampleFormat::F32 => {
-            let mut pcm = vec![0f32; interleaved];
-            let n = decoder.decode_float(Some(payload), &mut pcm, DecodeMode::Normal)?;
-            for s in &pcm[..n * channels.count()] {
-                out.extend_from_slice(&s.to_le_bytes());
-            }
+            let n = decoder.decode_float(Some(payload), pcm_f32, DecodeMode::Normal)?;
+            out.extend(
+                pcm_f32[..n * channels.count()]
+                    .iter()
+                    .flat_map(|s| s.to_le_bytes()),
+            );
         }
     }
     Ok(())
