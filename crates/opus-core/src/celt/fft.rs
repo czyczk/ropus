@@ -31,6 +31,10 @@ pub struct KissFftCpx {
 }
 
 /// Complex twiddle factor (i16 components). Matches C `kiss_twiddle_cpx`.
+///
+/// `repr(C)` fixes the (r, i) field order so aarch64 NEON kernels can load a
+/// twiddle as one packed 32-bit value (r in the low half on little-endian).
+#[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct KissTwiddleCpx {
     pub r: i16,
@@ -73,7 +77,7 @@ fn s_mul2(a: i32, b: i32) -> i32 {
 
 /// Complex multiply: data (i32) × twiddle (i16).
 #[inline(always)]
-fn c_mul(a: KissFftCpx, b: KissTwiddleCpx) -> KissFftCpx {
+pub(crate) fn c_mul(a: KissFftCpx, b: KissTwiddleCpx) -> KissFftCpx {
     KissFftCpx {
         r: sub32_ovflw(s_mul(a.r, b.r as i32), s_mul(a.i, b.i as i32)),
         i: add32_ovflw(s_mul(a.r, b.i as i32), s_mul(a.i, b.r as i32)),
@@ -82,7 +86,7 @@ fn c_mul(a: KissFftCpx, b: KissTwiddleCpx) -> KissFftCpx {
 
 /// `C_ADD(a, b)` — wrapping complex addition.
 #[inline(always)]
-fn c_add(a: KissFftCpx, b: KissFftCpx) -> KissFftCpx {
+pub(crate) fn c_add(a: KissFftCpx, b: KissFftCpx) -> KissFftCpx {
     KissFftCpx {
         r: add32_ovflw(a.r, b.r),
         i: add32_ovflw(a.i, b.i),
@@ -91,7 +95,7 @@ fn c_add(a: KissFftCpx, b: KissFftCpx) -> KissFftCpx {
 
 /// `C_SUB(a, b)` — wrapping complex subtraction.
 #[inline(always)]
-fn c_sub(a: KissFftCpx, b: KissFftCpx) -> KissFftCpx {
+pub(crate) fn c_sub(a: KissFftCpx, b: KissFftCpx) -> KissFftCpx {
     KissFftCpx {
         r: sub32_ovflw(a.r, b.r),
         i: sub32_ovflw(a.i, b.i),
@@ -100,21 +104,21 @@ fn c_sub(a: KissFftCpx, b: KissFftCpx) -> KissFftCpx {
 
 /// `C_ADDTO(res, a)` — wrapping in-place complex addition.
 #[inline(always)]
-fn c_addto(res: &mut KissFftCpx, a: KissFftCpx) {
+pub(crate) fn c_addto(res: &mut KissFftCpx, a: KissFftCpx) {
     res.r = add32_ovflw(res.r, a.r);
     res.i = add32_ovflw(res.i, a.i);
 }
 
 /// `C_MULBYSCALAR(c, s)` — multiply complex by real scalar.
 #[inline(always)]
-fn c_mulbyscalar(c: &mut KissFftCpx, s: i32) {
+pub(crate) fn c_mulbyscalar(c: &mut KissFftCpx, s: i32) {
     c.r = s_mul(c.r, s);
     c.i = s_mul(c.i, s);
 }
 
 /// `HALF_OF(x)` = `x >> 1`.
 #[inline(always)]
-fn half_of(x: i32) -> i32 {
+pub(crate) fn half_of(x: i32) -> i32 {
     x >> 1
 }
 
@@ -199,32 +203,47 @@ fn kf_bfly4(
 ) {
     if m == 1 {
         // Degenerate case: all twiddles are 1
-        let mut idx = 0;
-        for _ in 0..n {
-            let scratch0 = c_sub(uc!(fout, idx), uc!(fout, idx + 2));
-            let tmp = uc!(fout, idx + 2);
-            c_addto(uc_mut!(fout, idx), tmp);
-            let scratch1 = c_add(uc!(fout, idx + 1), uc!(fout, idx + 3));
-            uc_set!(fout, idx + 2, c_sub(uc!(fout, idx), scratch1));
-            c_addto(uc_mut!(fout, idx), scratch1);
-            let scratch1 = c_sub(uc!(fout, idx + 1), uc!(fout, idx + 3));
-
-            uc_mut!(fout, idx + 1).r = add32_ovflw(scratch0.r, scratch1.i);
-            uc_mut!(fout, idx + 1).i = sub32_ovflw(scratch0.i, scratch1.r);
-            uc_mut!(fout, idx + 3).r = sub32_ovflw(scratch0.r, scratch1.i);
-            uc_mut!(fout, idx + 3).i = add32_ovflw(scratch0.i, scratch1.r);
-            idx += 4;
+        #[cfg(all(target_arch = "aarch64", feature = "neon2"))]
+        {
+            crate::neon2::kf_bfly4_degenerate_neon(fout, n);
+            return;
         }
-    } else {
-        let m2 = 2 * m;
-        let m3 = 3 * m;
-        let twiddles = st.twiddles;
-        for i in 0..n {
-            let base = i * mm;
-            let mut tw1_idx = 0usize;
-            let mut tw2_idx = 0usize;
-            let mut tw3_idx = 0usize;
-            for j in 0..m {
+        #[cfg(not(all(target_arch = "aarch64", feature = "neon2")))]
+        {
+            let mut idx = 0;
+            for _ in 0..n {
+                let scratch0 = c_sub(uc!(fout, idx), uc!(fout, idx + 2));
+                let tmp = uc!(fout, idx + 2);
+                c_addto(uc_mut!(fout, idx), tmp);
+                let scratch1 = c_add(uc!(fout, idx + 1), uc!(fout, idx + 3));
+                uc_set!(fout, idx + 2, c_sub(uc!(fout, idx), scratch1));
+                c_addto(uc_mut!(fout, idx), scratch1);
+                let scratch1 = c_sub(uc!(fout, idx + 1), uc!(fout, idx + 3));
+
+                uc_mut!(fout, idx + 1).r = add32_ovflw(scratch0.r, scratch1.i);
+                uc_mut!(fout, idx + 1).i = sub32_ovflw(scratch0.i, scratch1.r);
+                uc_mut!(fout, idx + 3).r = sub32_ovflw(scratch0.r, scratch1.i);
+                uc_mut!(fout, idx + 3).i = add32_ovflw(scratch0.i, scratch1.r);
+                idx += 4;
+            }
+            return;
+        }
+    }
+    let m2 = 2 * m;
+    let m3 = 3 * m;
+    let twiddles = st.twiddles;
+    // On aarch64+neon2 the j-loop runs 4-wide; `j_done` is the vectorised
+    // prefix length per group (`m & !3`), the tail stays scalar.
+    #[cfg(all(target_arch = "aarch64", feature = "neon2"))]
+    let j_done = crate::neon2::kf_bfly4_neon(fout, fstride, twiddles, m, n, mm);
+    #[cfg(not(all(target_arch = "aarch64", feature = "neon2")))]
+    let j_done = 0usize;
+    for i in 0..n {
+        let base = i * mm;
+        let mut tw1_idx = j_done * fstride;
+        let mut tw2_idx = j_done * fstride * 2;
+        let mut tw3_idx = j_done * fstride * 3;
+        for j in j_done..m {
                 let f = base + j;
                 let scratch0 = c_mul(uc!(fout, f + m), uc!(twiddles, tw1_idx));
                 let scratch1 = c_mul(uc!(fout, f + m2), uc!(twiddles, tw2_idx));
@@ -244,7 +263,6 @@ fn kf_bfly4(
                 uc_mut!(fout, f + m).i = sub32_ovflw(scratch5.i, scratch4.r);
                 uc_mut!(fout, f + m3).r = sub32_ovflw(scratch5.r, scratch4.i);
                 uc_mut!(fout, f + m3).i = add32_ovflw(scratch5.i, scratch4.r);
-            }
         }
     }
 }
@@ -262,12 +280,17 @@ fn kf_bfly3(
     // epi3.i = -sin(2π/3) in Q15
     let epi3_i: i32 = -qconst32(0.86602540, 15);
 
+    // On aarch64+neon2 the j-loop runs 4-wide; the tail stays scalar.
+    #[cfg(all(target_arch = "aarch64", feature = "neon2"))]
+    let j_done = crate::neon2::kf_bfly3_neon(fout, fstride, st.twiddles, m, n, mm);
+    #[cfg(not(all(target_arch = "aarch64", feature = "neon2")))]
+    let j_done = 0usize;
     for i in 0..n {
         let base = i * mm;
-        let mut tw1_idx = 0usize;
-        let mut tw2_idx = 0usize;
+        let mut tw1_idx = j_done * fstride;
+        let mut tw2_idx = j_done * fstride * 2;
         let twiddles = st.twiddles;
-        for j in 0..m {
+        for j in j_done..m {
             let f = base + j;
             let scratch1 = c_mul(uc!(fout, f + m), uc!(twiddles, tw1_idx));
             let scratch2 = c_mul(uc!(fout, f + m2), uc!(twiddles, tw2_idx));
@@ -309,9 +332,14 @@ fn kf_bfly5(
     let yb_i: i32 = -qconst32(0.58778525, 15);
     let twiddles = st.twiddles;
 
+    // On aarch64+neon2 the u-loop runs 4-wide; the tail stays scalar.
+    #[cfg(all(target_arch = "aarch64", feature = "neon2"))]
+    let u_done = crate::neon2::kf_bfly5_neon(fout, fstride, twiddles, m, n, mm);
+    #[cfg(not(all(target_arch = "aarch64", feature = "neon2")))]
+    let u_done = 0usize;
     for i in 0..n {
         let base = i * mm;
-        for u in 0..m {
+        for u in u_done..m {
             let f0 = base + u;
             let f1 = f0 + m;
             let f2 = f0 + 2 * m;
@@ -737,6 +765,46 @@ pub static FFT_STATE_48000_960_3: KissFftState = KissFftState {
 
 #[cfg(test)]
 mod tests {
+    /// FFT timing harness (run manually):
+    ///   cargo test -p opus-core --release fft_bench -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn fft_bench() {
+        use std::time::Instant;
+        let mut rng: u32 = 0x1357_9BDF;
+        let mut lcg = || {
+            rng = rng.wrapping_mul(1103515245).wrapping_add(12345);
+            rng as i32
+        };
+        for st in [
+            &FFT_STATE_48000_960_0,
+            &FFT_STATE_48000_960_1,
+            &FFT_STATE_48000_960_2,
+            &FFT_STATE_48000_960_3,
+        ] {
+            let n = st.nfft as usize;
+            let f0: Vec<KissFftCpx> = (0..n)
+                .map(|_| KissFftCpx {
+                    r: lcg() >> 12,
+                    i: lcg() >> 12,
+                })
+                .collect();
+            let mut fbuf = f0.clone();
+            let iters = 50_000u32;
+            for _ in 0..1000 {
+                fbuf.copy_from_slice(&f0);
+                opus_fft_impl(st, &mut fbuf, 0);
+            }
+            let t0 = Instant::now();
+            for _ in 0..iters {
+                fbuf.copy_from_slice(std::hint::black_box(&f0));
+                opus_fft_impl(st, std::hint::black_box(&mut fbuf), 0);
+            }
+            let dt = t0.elapsed().as_nanos() as f64 / iters as f64;
+            println!("opus_fft_impl {n} (incl. copy): {dt:.1} ns/iter");
+        }
+    }
+
     use super::*;
 
     #[test]

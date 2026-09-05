@@ -13,6 +13,7 @@ opus-decoder = { path = "../opus-decoder", default-features = false }
 [features]
 default = []
 simd = ["opus-decoder/simd"]
+neon2 = ["opus-decoder/neon2"]
 
 [profile.release]
 opt-level = 3

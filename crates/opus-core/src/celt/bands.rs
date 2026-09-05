@@ -14,6 +14,8 @@ use super::vq::{
     alg_quant, alg_unquant, celt_inner_prod_norm_shift, renormalise_vector, stereo_itheta,
 };
 use crate::types::*;
+// Only the scalar `stereo_merge` fallback uses the unchecked-indexing macros.
+#[cfg(not(all(target_arch = "aarch64", feature = "neon2")))]
 use crate::{uc, uc_set};
 
 // ===========================================================================
@@ -449,6 +451,11 @@ fn stereo_merge(x: &mut [i32], y: &mut [i32], mid: i32, n: i32) {
     let kl = imax(7, kl);
     let kr = imax(7, kr);
 
+    #[cfg(all(target_arch = "aarch64", feature = "neon2"))]
+    {
+        crate::neon2::stereo_merge_neon(x, y, mid, lgain, rgain, kl, kr, nu);
+    }
+    #[cfg(not(all(target_arch = "aarch64", feature = "neon2")))]
     for j in 0..nu {
         let l = mult32_32_q31(mid, uc!(x, j));
         let r = uc!(y, j);

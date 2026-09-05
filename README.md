@@ -22,10 +22,13 @@ cargo build --release --workspace
 cargo test --workspace
 ```
 
-Default features enable portable `wide`-based SIMD kernels. The default
+Default features enable portable `wide`-based SIMD kernels plus, on aarch64,
+the explicit NEON kernels of the `neon2` tier (SILK resampler, SILK LPC/LTP
+synthesis, CELT FFT/MDCT, comb filter, stereo merge). The default
 x86-64 codegen baseline is Haswell+ (`x86-64-v3`, AVX2/FMA); override with
 `RUSTFLAGS="-C target-cpu=x86-64"`. wasm32 builds default to `+simd128`.
-Use `--no-default-features` for the bit-exact scalar-kernel fallback.
+Use `--no-default-features` for the bit-exact scalar-kernel fallback, or
+`--no-default-features --features neon2` to measure the NEON tier alone.
 
 ## Validate against the reference
 

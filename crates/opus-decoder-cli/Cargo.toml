@@ -19,3 +19,4 @@ opus-decoder = { path = "../opus-decoder", default-features = false }
 [features]
 default = ["simd"]
 simd = ["opus-decoder/simd"]
+neon2 = ["opus-decoder/neon2"]

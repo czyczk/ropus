@@ -50,6 +50,42 @@ fn s_mul(a: i32, b: i32) -> i32 {
 }
 
 // =========================================================================
+// Dynamic-range scan (maxval / sumval) — scalar reference + dispatch
+// =========================================================================
+
+/// Scalar dynamic-range scan of the MDCT input.
+/// `maxval = max(abs32(x))`, `sum_delta = Σ abs32(shr32(x, 11))` (wrapping).
+/// Samples past `input.len()` read as zero (they contribute nothing).
+/// Returns `(maxval, sum_delta)`; the caller seeds `sumval` with `n2`.
+/// Scalar reference for `norm_scan`'s NEON path (used by tests on aarch64).
+#[cfg_attr(all(target_arch = "aarch64", feature = "neon2"), allow(dead_code))]
+pub(crate) fn norm_scan_scalar(input: &[i32], n2: usize, stride: usize) -> (i32, i32) {
+    let input_len = input.len();
+    let mut maxval: i32 = 0;
+    let mut sum_delta: i32 = 0;
+    for i in 0..n2 {
+        let idx = i * stride;
+        let sample = if idx < input_len { uc!(input, idx) } else { 0 };
+        maxval = max32(maxval, abs32(sample));
+        sum_delta = add32_ovflw(sum_delta, abs32(shr32(sample, 11)));
+    }
+    (maxval, sum_delta)
+}
+
+/// Dispatch: on aarch64+neon2 the stride==1 scan runs as a 4-lane NEON
+/// reduction (bit-exact; the zero tail contributes nothing).
+#[inline(always)]
+fn norm_scan(input: &[i32], n2: usize, stride: usize) -> (i32, i32) {
+    #[cfg(all(target_arch = "aarch64", feature = "neon2"))]
+    {
+        if stride == 1 {
+            return crate::neon2::mdct_norm_scan_neon(input, n2, input.len());
+        }
+    }
+    norm_scan_scalar(input, n2, stride)
+}
+
+// =========================================================================
 // clt_mdct_backward — Inverse MDCT
 // =========================================================================
 
@@ -141,15 +177,8 @@ pub fn clt_mdct_backward(
     let post_shift: i32;
     let fft_shift: i32;
     {
-        let input_len = input.len();
-        let mut sumval: i32 = n2;
-        let mut maxval: i32 = 0;
-        for i in 0..n2 as usize {
-            let idx = i * stride;
-            let sample = if idx < input_len { uc!(input, idx) } else { 0 };
-            maxval = max32(maxval, abs32(sample));
-            sumval = add32_ovflw(sumval, abs32(shr32(sample, 11)));
-        }
+        let (maxval, sum_delta) = norm_scan(input, n2 as usize, stride);
+        let sumval: i32 = add32_ovflw(n2, sum_delta);
         pre_shift = imax(0, 29 - celt_zlog2(1 + maxval));
         let ps = imax(0, 19 - celt_ilog2(abs32(sumval)));
         post_shift = imin(ps, pre_shift);
@@ -163,13 +192,32 @@ pub fn clt_mdct_backward(
         let half_ov = (overlap >> 1) as usize;
         let input_len = input.len();
         let full_input = input_len >= n2 as usize * stride;
-        let mut xp1_idx: usize = 0; // walks forward by 2*stride
-        let mut xp2_idx: usize = (n2 - 1) as usize; // walks backward
+        // On aarch64+neon2, run the contiguous full-input/stride-1 case four
+        // lanes wide; the bit-reversed stores stay scalar (scatter).
+        #[cfg(all(target_arch = "aarch64", feature = "neon2"))]
+        let start_i = if stride == 1 && full_input {
+            crate::neon2::mdct_prerotate_neon(
+                output,
+                input,
+                half_ov,
+                n2 as usize,
+                n4 as usize,
+                trig,
+                st.bitrev,
+                pre_shift,
+            )
+        } else {
+            0
+        };
+        #[cfg(not(all(target_arch = "aarch64", feature = "neon2")))]
+        let start_i = 0usize;
+        let mut xp1_idx: usize = 2 * start_i; // walks forward by 2*stride
+        let mut xp2_idx: usize = (n2 - 1) as usize - 2 * start_i; // walks backward
         // Note: xp1 and xp2 index into input[] with stride spacing
         // but the actual read positions are xp1_idx*stride and xp2_idx*stride
 
         let bitrev = st.bitrev;
-        for i in 0..n4 as usize {
+        for i in start_i..n4 as usize {
             let rev = uc!(bitrev, i) as usize;
             let idx1 = xp1_idx * stride;
             let idx2 = xp2_idx * stride;
@@ -232,12 +280,26 @@ pub fn clt_mdct_backward(
     // Works from both ends toward the middle, in-place.
     {
         let half_ov = overlap >> 1;
-        let mut yp0 = half_ov; // walks forward by 2
-        let mut yp1 = half_ov + n2 as usize - 2; // walks backward by 2
+        // On aarch64+neon2, process 4 iterations per vector while the
+        // forward/backward windows stay disjoint; scalar tail at the middle.
+        #[cfg(all(target_arch = "aarch64", feature = "neon2"))]
+        let start_i = crate::neon2::mdct_postrotate_neon(
+            output,
+            half_ov,
+            n2 as usize,
+            n4 as usize,
+            trig,
+            post_shift,
+        );
+        #[cfg(not(all(target_arch = "aarch64", feature = "neon2")))]
+        let start_i = 0usize;
+
+        let mut yp0 = half_ov + 2 * start_i; // walks forward by 2
+        let mut yp1 = half_ov + n2 as usize - 2 - 2 * start_i; // walks backward by 2
 
         // Loop to (N4+1)>>1 to handle odd N4. When N4 is odd, the
         // middle pair will be computed twice.
-        for i in 0..((n4 + 1) >> 1) as usize {
+        for i in start_i..((n4 + 1) >> 1) as usize {
             let re = uc!(output, yp0 + 1);
             let im = uc!(output, yp0);
             let t0 = uc!(trig, i) as i32;

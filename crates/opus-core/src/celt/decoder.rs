@@ -293,7 +293,11 @@ fn comb_filter(
         let count = n as usize - start;
         // We need to work with slices that allow negative-offset reads relative to off.
         // Since buf[off - T1] must be valid, we work directly.
-        for i in 0..count {
+        #[cfg(all(target_arch = "aarch64", feature = "neon2"))]
+        let done = crate::neon2::comb_filter_const_neon(buf, off, count, t1, g10, g11, g12);
+        #[cfg(not(all(target_arch = "aarch64", feature = "neon2")))]
+        let done = 0usize;
+        for i in done..count {
             let idx = off + i;
             let x0 = buf[idx + 2 - t1];
             let x2 = buf[idx - t1];
@@ -318,6 +322,34 @@ fn comb_filter(
 ///
 /// Handles downsampling and accumulation modes.
 /// Matches C `deemphasis()` (FIXED_POINT, non-custom-mode path).
+/// Scalar stereo deemphasis fast path (downsample=1, cc=2, no accum),
+/// matching C's `deemphasis_stereo_simple`. Returns the updated IIR state.
+/// On aarch64+neon2 the NEON lane-2 kernel replaces it; kept as the
+/// cross-check reference for tests.
+#[cfg_attr(all(target_arch = "aarch64", feature = "neon2"), allow(dead_code))]
+pub(crate) fn deemphasis_stereo_simple(
+    inp: &[&[i32]],
+    pcm: &mut [i16],
+    n: usize,
+    coef0: i32,
+    m0: i32,
+    m1: i32,
+) -> (i32, i32) {
+    let x0 = inp[0];
+    let x1 = inp[1];
+    let mut m0 = m0;
+    let mut m1 = m1;
+    for j in 0..n {
+        let tmp0 = saturate(x0[j] + VERY_SMALL + m0, SIG_SAT);
+        let tmp1 = saturate(x1[j] + VERY_SMALL + m1, SIG_SAT);
+        m0 = mult16_32_q15(coef0, tmp0);
+        m1 = mult16_32_q15(coef0, tmp1);
+        pcm[j * 2] = sig2word16(tmp0) as i16;
+        pcm[j * 2 + 1] = sig2word16(tmp1) as i16;
+    }
+    (m0, m1)
+}
+
 fn deemphasis(
     inp: &[&[i32]],  // per-channel input signal slices
     pcm: &mut [i16], // interleaved output
@@ -332,22 +364,13 @@ fn deemphasis(
     let nd = n / downsample;
 
     // Common stereo/no-downsample/no-accumulation case, matching C's
-    // `deemphasis_stereo_simple`. Keeping both channels in one loop gives
-    // contiguous interleaved stores and shortens the per-sample dependency
-    // bookkeeping; the generic path below handles the remaining modes.
+    // `deemphasis_stereo_simple`. A two-lane NEON version was tried in neon2
+    // and reverted: the per-channel IIR chain is latency-bound, so packing
+    // two channels into lanes only added vector-crossing overhead (~10%
+    // slower at kernel level on M1 Pro; see PERFORMANCE.md).
     if downsample == 1 && cc == 2 && !accum {
-        let x0 = inp[0];
-        let x1 = inp[1];
-        let mut m0 = mem[0];
-        let mut m1 = mem[1];
-        for j in 0..n as usize {
-            let tmp0 = saturate(x0[j] + VERY_SMALL + m0, SIG_SAT);
-            let tmp1 = saturate(x1[j] + VERY_SMALL + m1, SIG_SAT);
-            m0 = mult16_32_q15(coef0, tmp0);
-            m1 = mult16_32_q15(coef0, tmp1);
-            pcm[j * 2] = sig2word16(tmp0) as i16;
-            pcm[j * 2 + 1] = sig2word16(tmp1) as i16;
-        }
+        let n = n as usize;
+        let (m0, m1) = deemphasis_stereo_simple(inp, pcm, n, coef0, mem[0], mem[1]);
         mem[0] = m0;
         mem[1] = m1;
         return;

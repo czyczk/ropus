@@ -13,6 +13,7 @@ thiserror = "2"
 [features]
 default = ["simd"]
 simd = ["opus-core/simd"]
+neon2 = ["opus-core/neon2"]
 
 [dev-dependencies]
 criterion = "0.5"

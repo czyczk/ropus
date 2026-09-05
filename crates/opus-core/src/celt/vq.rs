@@ -39,11 +39,18 @@ fn celt_udiv(n: u32, d: u32) -> u32 {
 pub fn celt_inner_prod_norm_shift(x: &[i32], y: &[i32], n: usize) -> i32 {
     debug_assert!(x.len() >= n);
     debug_assert!(y.len() >= n);
-    let mut sum: i64 = 0;
-    for i in 0..n {
-        sum += uc!(x, i) as i64 * uc!(y, i) as i64;
+    #[cfg(all(target_arch = "aarch64", feature = "neon2"))]
+    {
+        crate::neon2::celt_inner_prod_norm_shift_neon(x, y, n)
     }
-    (sum >> (2 * (NORM_SHIFT - 14))) as i32
+    #[cfg(not(all(target_arch = "aarch64", feature = "neon2")))]
+    {
+        let mut sum: i64 = 0;
+        for i in 0..n {
+            sum += uc!(x, i) as i64 * uc!(y, i) as i64;
+        }
+        (sum >> (2 * (NORM_SHIFT - 14))) as i32
+    }
 }
 
 /// Inner product on Q14-scaled norm values (after scaledown).

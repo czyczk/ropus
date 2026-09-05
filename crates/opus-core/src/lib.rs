@@ -108,6 +108,14 @@
 )]
 
 pub mod celt;
+// Explicit aarch64 NEON kernels ("neon2"): hand-written intrinsics for the
+// hot loops that neither LLVM auto-vectorisation nor the portable `wide`
+// kernels cover (SILK resampler, CELT deemphasis/MDCT norm scan, SILK
+// LPC/LTP synthesis). Bit-exact against the scalar paths; compiled only on
+// aarch64 with the `neon2` feature (implied by `simd`).
+#[cfg(all(target_arch = "aarch64", feature = "neon2"))]
+pub(crate) mod neon2;
+
 #[cfg(feature = "ml")]
 pub mod dnn;
 #[cfg(not(feature = "ml"))]

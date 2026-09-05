@@ -22,11 +22,19 @@ include = [
 
 [features]
 default = []
-# Compile the `wide`-based CELT SIMD kernels. Disabling this feature keeps a
-# bit-exact scalar fallback for xcorr, maxabs, band denormalisation, and MDCT
-# windowing. The decoder crate's default feature enables it; consumers can
-# override with default-features = false.
-simd = ["dep:wide"]
+# Compile the `wide`-based CELT SIMD kernels plus the explicit aarch64 NEON
+# kernels (`neon2`). Disabling this feature keeps a bit-exact scalar fallback
+# for xcorr, maxabs, band denormalisation, MDCT windowing, and the NEON
+# kernels listed below. The decoder crate's default feature enables it;
+# consumers can override with default-features = false.
+simd = ["dep:wide", "neon2"]
+# Explicit aarch64 NEON intrinsics kernels ("second NEON tier"): SILK
+# resampler FIR/allpass, SILK recursive LPC/LTP synthesis dot products, CELT
+# deemphasis stereo and MDCT dynamic-range scan. Bit-exact against the scalar
+# paths. No-op outside aarch64. Enabled by `simd` by default; can be enabled
+# standalone (`--no-default-features --features neon2`) to measure/audit the
+# NEON kernels without the portable `wide` kernels.
+neon2 = []
 # Opt-in compilation of the original DNN/deep-PLC/DRED modules. OFF by
 # default: this repository is scoped to RFC 6716 classical decoding and uses
 # the inert stubs in lib.rs instead.

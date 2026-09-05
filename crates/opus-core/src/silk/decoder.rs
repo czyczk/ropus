@@ -848,89 +848,109 @@ fn silk_decode_parameters(
 // Inverse NSQ: decode_core
 // ===========================================================================
 
-/// NEON dot-product for one SILK LPC synthesis sample. The synthesis filter
-/// is recursive (each sample updates the state used by the next sample), so
-/// the four-way vectorisation is across filter taps within one sample rather
-/// than across output samples.
-#[cfg(all(target_arch = "aarch64", feature = "simd"))]
+/// Build the reversed 16-lane LPC coefficient vector consumed by
+/// `neon2::silk_lpc_synth_subframe_neon`: lane k pairs with
+/// `state[base-16+k]`, so `a_rev16[15-j] = a[j]` (order 16 fills all lanes;
+/// order 10 leaves the first 6 lanes zero).
+#[cfg(all(target_arch = "aarch64", feature = "neon2"))]
 #[inline(always)]
-fn silk_lpc_synth_pred_neon_one(
-    state: &[i32],
+fn lpc_coefs_reversed16(a_q12: &[i16], order: usize) -> [i16; 16] {
+    let mut a_rev = [0i16; 16];
+    for j in 0..order {
+        a_rev[15 - j] = a_q12[j];
+    }
+    a_rev
+}
+
+/// Scalar LPC synthesis over one subframe (C-style unrolled 10/16-tap dot
+/// with a checked generic fallback). Reference for the neon2 subframe kernel.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn silk_lpc_synth_subframe_scalar(
+    s_lpc_q14: &mut [i32],
+    res_q14: &[i32],
+    xq: &mut [i16],
+    xq_offset: usize,
+    gain_q10: i32,
     a_q12: &[i16],
-    order: usize,
-    bias: i32,
-    i: usize,
-) -> i32 {
-    use std::arch::aarch64::*;
-    debug_assert!(order == MIN_LPC_ORDER || order == MAX_LPC_ORDER);
-
-    unsafe {
-        let mut sum0 = vdupq_n_s64(0);
-        let mut sum1 = vdupq_n_s64(0);
-        let mut j = 0usize;
-        macro_rules! tap4 {
-            () => {{
-                let ptr = state.as_ptr().add(MAX_LPC_ORDER + i - 1 - j - 3);
-                let sv = vld1q_s32(ptr);
-                let rev = vrev64q_s32(sv);
-                let rev = vextq_s32(rev, rev, 2);
-                let cv = vmovl_s16(vld1_s16(a_q12.as_ptr().add(j)));
-                sum0 = vaddq_s64(
-                    sum0,
-                    vshrq_n_s64(vmull_s32(vget_low_s32(rev), vget_low_s32(cv)), 16),
-                );
-                sum1 = vaddq_s64(
-                    sum1,
-                    vshrq_n_s64(vmull_s32(vget_high_s32(rev), vget_high_s32(cv)), 16),
-                );
-                j += 4;
-            }};
-        }
-        if order == MAX_LPC_ORDER {
-            tap4!();
-            tap4!();
-            tap4!();
-            tap4!();
+    lpc_order: usize,
+    subfr_length: usize,
+) {
+    for i in 0..subfr_length {
+        // LPC prediction with rounding bias. C hard-unrolls the common
+        // SILK orders (10 and 16); keep the generic checked loop only for
+        // unexpected orders.
+        let mut lpc_pred_q10: i32 = (lpc_order >> 1) as i32;
+        if lpc_order == MIN_LPC_ORDER || lpc_order == MAX_LPC_ORDER {
+            let base = MAX_LPC_ORDER + i;
+            let t0 = ((uc!(s_lpc_q14, base - 1) as i64 * uc!(a_q12, 0) as i64) >> 16) as i32;
+            let t1 = ((uc!(s_lpc_q14, base - 2) as i64 * uc!(a_q12, 1) as i64) >> 16) as i32;
+            let t2 = ((uc!(s_lpc_q14, base - 3) as i64 * uc!(a_q12, 2) as i64) >> 16) as i32;
+            let t3 = ((uc!(s_lpc_q14, base - 4) as i64 * uc!(a_q12, 3) as i64) >> 16) as i32;
+            let t4 = ((uc!(s_lpc_q14, base - 5) as i64 * uc!(a_q12, 4) as i64) >> 16) as i32;
+            let t5 = ((uc!(s_lpc_q14, base - 6) as i64 * uc!(a_q12, 5) as i64) >> 16) as i32;
+            let t6 = ((uc!(s_lpc_q14, base - 7) as i64 * uc!(a_q12, 6) as i64) >> 16) as i32;
+            let t7 = ((uc!(s_lpc_q14, base - 8) as i64 * uc!(a_q12, 7) as i64) >> 16) as i32;
+            let t8 = ((uc!(s_lpc_q14, base - 9) as i64 * uc!(a_q12, 8) as i64) >> 16) as i32;
+            let t9 = ((uc!(s_lpc_q14, base - 10) as i64 * uc!(a_q12, 9) as i64) >> 16) as i32;
+            // Wrapping addition is associative modulo 2^32, so the
+            // balanced tree below matches the C silk_SMLAWB chain
+            // bit-for-bit while exposing more ILP.
+            let s01 = t0.wrapping_add(t1);
+            let s23 = t2.wrapping_add(t3);
+            let s45 = t4.wrapping_add(t5);
+            let s67 = t6.wrapping_add(t7);
+            let s89 = t8.wrapping_add(t9);
+            let s0123 = s01.wrapping_add(s23);
+            let s4567 = s45.wrapping_add(s67);
+            let mut sum = s0123.wrapping_add(s4567).wrapping_add(s89);
+            if lpc_order == MAX_LPC_ORDER {
+                let t10 =
+                    ((uc!(s_lpc_q14, base - 11) as i64 * uc!(a_q12, 10) as i64) >> 16) as i32;
+                let t11 =
+                    ((uc!(s_lpc_q14, base - 12) as i64 * uc!(a_q12, 11) as i64) >> 16) as i32;
+                let t12 =
+                    ((uc!(s_lpc_q14, base - 13) as i64 * uc!(a_q12, 12) as i64) >> 16) as i32;
+                let t13 =
+                    ((uc!(s_lpc_q14, base - 14) as i64 * uc!(a_q12, 13) as i64) >> 16) as i32;
+                let t14 =
+                    ((uc!(s_lpc_q14, base - 15) as i64 * uc!(a_q12, 14) as i64) >> 16) as i32;
+                let t15 =
+                    ((uc!(s_lpc_q14, base - 16) as i64 * uc!(a_q12, 15) as i64) >> 16) as i32;
+                let s10_11 = t10.wrapping_add(t11);
+                let s12_13 = t12.wrapping_add(t13);
+                let s14_15 = t14.wrapping_add(t15);
+                let extra = s10_11.wrapping_add(s12_13).wrapping_add(s14_15);
+                sum = sum.wrapping_add(extra);
+            }
+            lpc_pred_q10 = lpc_pred_q10.wrapping_add(sum);
         } else {
-            tap4!();
-            tap4!();
+            for j in 0..lpc_order {
+                let idx = MAX_LPC_ORDER + i - j - 1;
+                lpc_pred_q10 =
+                    (lpc_pred_q10 as i64 + ((s_lpc_q14[idx] as i64 * a_q12[j] as i64) >> 16)) as i32;
+            }
         }
 
-        let mut sum = i64::from(bias)
-            + vgetq_lane_s64(sum0, 0)
-            + vgetq_lane_s64(sum0, 1)
-            + vgetq_lane_s64(sum1, 0)
-            + vgetq_lane_s64(sum1, 1);
-        while j < order {
-            let idx = MAX_LPC_ORDER + i - 1 - j;
-            sum += (state[idx] as i64 * a_q12[j] as i64) >> 16;
-            j += 1;
-        }
-        sum as i32
+        // Combine residual with prediction
+        s_lpc_q14[MAX_LPC_ORDER + i] =
+            silk_add_sat32(res_q14[i], silk_lshift_sat32(lpc_pred_q10, 4));
+
+        // Apply gain and output
+        let out_val = silk_rshift_round(silk_smulww(s_lpc_q14[MAX_LPC_ORDER + i], gain_q10), 8);
+        xq[xq_offset + i] = sat16(out_val);
     }
 }
 
-/// NEON dot-product for one voiced SILK LTP prediction sample (5 taps).
-/// LTP state is also recursive, so vectorisation stays within one sample.
-#[cfg(all(target_arch = "aarch64", feature = "simd"))]
+/// Build the reversed LTP coefficient vector consumed by
+/// `neon2::silk_ltp_pred_neon`: `b_rev[k] = b[4-k]`.
+#[cfg(all(target_arch = "aarch64", feature = "neon2"))]
 #[inline(always)]
-fn silk_ltp_pred_neon_one(state: &[i32], b_q14: &[i16], pred_base: i64) -> i32 {
-    use std::arch::aarch64::*;
-    unsafe {
-        let p = pred_base as usize;
-        let sv = vld1q_s32(state.as_ptr().add(p - 3));
-        let rev = vrev64q_s32(sv);
-        let rev = vextq_s32(rev, rev, 2);
-        let cv = vmovl_s16(vld1_s16(b_q14.as_ptr()));
-        let lo = vshrq_n_s64(vmull_s32(vget_low_s32(rev), vget_low_s32(cv)), 16);
-        let hi = vshrq_n_s64(vmull_s32(vget_high_s32(rev), vget_high_s32(cv)), 16);
-        let mut sum = vgetq_lane_s64(lo, 0)
-            + vgetq_lane_s64(lo, 1)
-            + vgetq_lane_s64(hi, 0)
-            + vgetq_lane_s64(hi, 1);
-        sum += ((state[p - 4] as i64 * b_q14[4] as i64) >> 16) as i64;
-        sum as i32
+fn ltp_coefs_reversed(b_q14: &[i16]) -> [i16; 8] {
+    let mut b_rev = [0i16; 8];
+    for k in 0..LTP_ORDER {
+        b_rev[k] = b_q14[LTP_ORDER - 1 - k];
     }
+    b_rev
 }
 
 fn silk_decode_core(
@@ -1009,6 +1029,11 @@ fn silk_decode_core(
         let a_q12 = &dec_ctrl_mut.pred_coef_q12[k >> 1];
         let gain_q10 = dec_ctrl_mut.gains_q16[k] >> 6;
 
+        // Reversed 16-lane coefficient vector for the NEON subframe kernel;
+        // prepared once per subframe.
+        #[cfg(all(target_arch = "aarch64", feature = "neon2"))]
+        let a_q12_rev = lpc_coefs_reversed16(a_q12, lpc_order);
+
         // Compute inverse gain
         let mut inv_gain_q31 = silk_inverse32_var_q(dec_ctrl_mut.gains_q16[k], 47);
 
@@ -1042,6 +1067,8 @@ fn silk_decode_core(
         }
 
         let b_q14 = &dec_ctrl_mut.ltp_coef_q14[k * LTP_ORDER..(k + 1) * LTP_ORDER];
+        #[cfg(all(target_arch = "aarch64", feature = "neon2"))]
+        let b_q14_rev = ltp_coefs_reversed(b_q14);
 
         // Reuse one residual buffer for all subframes.
         let res_q14 = &mut res_q14_storage[..subfr_length];
@@ -1121,12 +1148,12 @@ fn silk_decode_core(
                 let pred_base = s_ltp_buf_idx as i64 - lag as i64 + (LTP_ORDER / 2) as i64;
                 let mut ltp_pred_q13: i32 = 2; // Rounding bias
                 if pred_base >= (LTP_ORDER - 1) as i64 && (pred_base as usize) < s_ltp_q15.len() {
-                    #[cfg(all(target_arch = "aarch64", feature = "simd"))]
+                    #[cfg(all(target_arch = "aarch64", feature = "neon2"))]
                     {
-                        let sum = silk_ltp_pred_neon_one(&s_ltp_q15, b_q14, pred_base);
+                        let sum = crate::neon2::silk_ltp_pred_neon(&s_ltp_q15, &b_q14_rev, pred_base);
                         ltp_pred_q13 = ltp_pred_q13.wrapping_add(sum);
                     }
-                    #[cfg(not(all(target_arch = "aarch64", feature = "simd")))]
+                    #[cfg(not(all(target_arch = "aarch64", feature = "neon2")))]
                     {
                         let p = pred_base as usize;
                         let t0 = ((uc!(s_ltp_q15, p) as i64 * uc!(b_q14, 0) as i64) >> 16) as i32;
@@ -1173,76 +1200,49 @@ fn silk_decode_core(
         }
 
         // LPC synthesis
-        for i in 0..subfr_length {
-            // LPC prediction with rounding bias. C hard-unrolls the common
-            // SILK orders (10 and 16); keep the generic checked loop only for
-            // unexpected orders.
-            let mut lpc_pred_q10: i32 = (lpc_order >> 1) as i32;
-            #[cfg(all(target_arch = "aarch64", feature = "simd"))]
-            {
-                lpc_pred_q10 =
-                    silk_lpc_synth_pred_neon_one(&s_lpc_q14, a_q12, lpc_order, lpc_pred_q10, i);
-            }
-            #[cfg(not(all(target_arch = "aarch64", feature = "simd")))]
-            if lpc_order == MIN_LPC_ORDER || lpc_order == MAX_LPC_ORDER {
-                let base = MAX_LPC_ORDER + i;
-                let t0 = ((uc!(s_lpc_q14, base - 1) as i64 * uc!(a_q12, 0) as i64) >> 16) as i32;
-                let t1 = ((uc!(s_lpc_q14, base - 2) as i64 * uc!(a_q12, 1) as i64) >> 16) as i32;
-                let t2 = ((uc!(s_lpc_q14, base - 3) as i64 * uc!(a_q12, 2) as i64) >> 16) as i32;
-                let t3 = ((uc!(s_lpc_q14, base - 4) as i64 * uc!(a_q12, 3) as i64) >> 16) as i32;
-                let t4 = ((uc!(s_lpc_q14, base - 5) as i64 * uc!(a_q12, 4) as i64) >> 16) as i32;
-                let t5 = ((uc!(s_lpc_q14, base - 6) as i64 * uc!(a_q12, 5) as i64) >> 16) as i32;
-                let t6 = ((uc!(s_lpc_q14, base - 7) as i64 * uc!(a_q12, 6) as i64) >> 16) as i32;
-                let t7 = ((uc!(s_lpc_q14, base - 8) as i64 * uc!(a_q12, 7) as i64) >> 16) as i32;
-                let t8 = ((uc!(s_lpc_q14, base - 9) as i64 * uc!(a_q12, 8) as i64) >> 16) as i32;
-                let t9 = ((uc!(s_lpc_q14, base - 10) as i64 * uc!(a_q12, 9) as i64) >> 16) as i32;
-                // Wrapping addition is associative modulo 2^32, so the
-                // balanced tree below matches the C silk_SMLAWB chain
-                // bit-for-bit while exposing more ILP.
-                let s01 = t0.wrapping_add(t1);
-                let s23 = t2.wrapping_add(t3);
-                let s45 = t4.wrapping_add(t5);
-                let s67 = t6.wrapping_add(t7);
-                let s89 = t8.wrapping_add(t9);
-                let s0123 = s01.wrapping_add(s23);
-                let s4567 = s45.wrapping_add(s67);
-                let mut sum = s0123.wrapping_add(s4567).wrapping_add(s89);
-                if lpc_order == MAX_LPC_ORDER {
-                    let t10 =
-                        ((uc!(s_lpc_q14, base - 11) as i64 * uc!(a_q12, 10) as i64) >> 16) as i32;
-                    let t11 =
-                        ((uc!(s_lpc_q14, base - 12) as i64 * uc!(a_q12, 11) as i64) >> 16) as i32;
-                    let t12 =
-                        ((uc!(s_lpc_q14, base - 13) as i64 * uc!(a_q12, 12) as i64) >> 16) as i32;
-                    let t13 =
-                        ((uc!(s_lpc_q14, base - 14) as i64 * uc!(a_q12, 13) as i64) >> 16) as i32;
-                    let t14 =
-                        ((uc!(s_lpc_q14, base - 15) as i64 * uc!(a_q12, 14) as i64) >> 16) as i32;
-                    let t15 =
-                        ((uc!(s_lpc_q14, base - 16) as i64 * uc!(a_q12, 15) as i64) >> 16) as i32;
-                    let s10_11 = t10.wrapping_add(t11);
-                    let s12_13 = t12.wrapping_add(t13);
-                    let s14_15 = t14.wrapping_add(t15);
-                    let extra = s10_11.wrapping_add(s12_13).wrapping_add(s14_15);
-                    sum = sum.wrapping_add(extra);
-                }
-                lpc_pred_q10 = lpc_pred_q10.wrapping_add(sum);
-            } else {
-                for j in 0..lpc_order {
-                    let idx = MAX_LPC_ORDER + i - j - 1;
-                    lpc_pred_q10 = (lpc_pred_q10 as i64
-                        + ((s_lpc_q14[idx] as i64 * a_q12[j] as i64) >> 16))
-                        as i32;
-                }
-            }
-
-            // Combine residual with prediction
-            s_lpc_q14[MAX_LPC_ORDER + i] =
-                silk_add_sat32(res_q14[i], silk_lshift_sat32(lpc_pred_q10, 4));
-
-            // Apply gain and output
-            let out_val = silk_rshift_round(silk_smulww(s_lpc_q14[MAX_LPC_ORDER + i], gain_q10), 8);
-            xq[xq_offset + i] = sat16(out_val);
+        #[cfg(all(target_arch = "aarch64", feature = "neon2"))]
+        if lpc_order == MIN_LPC_ORDER || lpc_order == MAX_LPC_ORDER {
+            // Register-resident sliding-window NEON kernel: the 16-state
+            // window lives in vector registers, removing the previous
+            // sample's store from the loop-carried dependency chain (a wide
+            // per-sample reload partially overlaps the 4-byte store and
+            // misses store-to-load forwarding on Apple cores).
+            crate::neon2::silk_lpc_synth_subframe_neon(
+                s_lpc_q14,
+                res_q14,
+                xq,
+                xq_offset,
+                gain_q10,
+                &a_q12_rev,
+                lpc_order,
+                subfr_length,
+            );
+        } else {
+            // Structurally unreachable (lpc_order is fs-derived), but keep
+            // the checked generic path as a defensive fallback.
+            silk_lpc_synth_subframe_scalar(
+                s_lpc_q14,
+                res_q14,
+                xq,
+                xq_offset,
+                gain_q10,
+                a_q12,
+                lpc_order,
+                subfr_length,
+            );
+        }
+        #[cfg(not(all(target_arch = "aarch64", feature = "neon2")))]
+        {
+            silk_lpc_synth_subframe_scalar(
+                s_lpc_q14,
+                res_q14,
+                xq,
+                xq_offset,
+                gain_q10,
+                a_q12,
+                lpc_order,
+                subfr_length,
+            );
         }
 
         // Shift LPC state for next subframe
@@ -1975,7 +1975,9 @@ pub fn silk_resampler_init_pub(
 }
 
 /// 2x high-quality upsampling using 3rd-order allpass.
-fn silk_resampler_private_up2_hq(
+/// Scalar reference for `up2_hq`'s NEON path (used by tests on aarch64).
+#[cfg_attr(all(target_arch = "aarch64", feature = "neon2"), allow(dead_code))]
+pub(crate) fn silk_resampler_private_up2_hq(
     s: &mut [i32; SILK_RESAMPLER_MAX_IIR_ORDER],
     out: &mut [i16],
     input: &[i16],
@@ -2026,6 +2028,92 @@ fn silk_resampler_private_up2_hq(
     }
 }
 
+/// Dispatch wrapper around `silk_resampler_private_up2_hq`: the even/odd
+/// allpass paths are independent per input sample, so on aarch64+neon2 they
+/// run in two NEON lanes (bit-exact, verified against the scalar path).
+#[inline(always)]
+fn up2_hq(
+    s: &mut [i32; SILK_RESAMPLER_MAX_IIR_ORDER],
+    out: &mut [i16],
+    input: &[i16],
+    len: usize,
+) {
+    #[cfg(all(target_arch = "aarch64", feature = "neon2"))]
+    {
+        crate::neon2::silk_up2_hq_neon(s, out, input, len);
+    }
+    #[cfg(not(all(target_arch = "aarch64", feature = "neon2")))]
+    {
+        silk_resampler_private_up2_hq(s, out, input, len);
+    }
+}
+
+/// Scalar fractional-delay FIR interpolation loop of
+/// `silk_resampler_private_iir_fir`. Returns the advanced `out_ptr`.
+/// Scalar reference for `fir12_interpolate`'s NEON path (used by tests).
+#[cfg_attr(all(target_arch = "aarch64", feature = "neon2"), allow(dead_code))]
+pub(crate) fn fir12_interpolate_scalar(
+    buf: &[i16],
+    out: &mut [i16],
+    mut out_ptr: usize,
+    max_index_q16: i32,
+    index_increment_q16: i32,
+) -> usize {
+    use crate::silk::tables::*;
+    let mut index_q16 = 0i32;
+    while index_q16 < max_index_q16 {
+        let table_index = smulwb(index_q16 & 0xFFFF, 12) as usize;
+        let buf_idx = (index_q16 >> 16) as usize;
+
+        // The iCDF walk stays below 2*n_samples_in and n_samples_in
+        // <= batch_size, so buf_idx+7 is always inside `buf`. Unsafe
+        // reads remove the per-tap bounds checks while preserving the
+        // C reference's unchecked table access.
+        let mut res_q15 =
+            (uc!(buf, buf_idx) as i32) * (SILK_RESAMPLER_FRAC_FIR_12[table_index][0] as i32);
+        res_q15 +=
+            (uc!(buf, buf_idx + 1) as i32) * (SILK_RESAMPLER_FRAC_FIR_12[table_index][1] as i32);
+        res_q15 +=
+            (uc!(buf, buf_idx + 2) as i32) * (SILK_RESAMPLER_FRAC_FIR_12[table_index][2] as i32);
+        res_q15 +=
+            (uc!(buf, buf_idx + 3) as i32) * (SILK_RESAMPLER_FRAC_FIR_12[table_index][3] as i32);
+        res_q15 += (uc!(buf, buf_idx + 4) as i32)
+            * (SILK_RESAMPLER_FRAC_FIR_12[11 - table_index][3] as i32);
+        res_q15 += (uc!(buf, buf_idx + 5) as i32)
+            * (SILK_RESAMPLER_FRAC_FIR_12[11 - table_index][2] as i32);
+        res_q15 += (uc!(buf, buf_idx + 6) as i32)
+            * (SILK_RESAMPLER_FRAC_FIR_12[11 - table_index][1] as i32);
+        res_q15 += (uc!(buf, buf_idx + 7) as i32)
+            * (SILK_RESAMPLER_FRAC_FIR_12[11 - table_index][0] as i32);
+
+        if out_ptr < out.len() {
+            out[out_ptr] = sat16(silk_rshift_round(res_q15, 15));
+        }
+        out_ptr += 1;
+        index_q16 += index_increment_q16;
+    }
+    out_ptr
+}
+
+/// Dispatch wrapper: NEON 8-tap dot product on aarch64+neon2.
+#[inline(always)]
+fn fir12_interpolate(
+    buf: &[i16],
+    out: &mut [i16],
+    out_ptr: usize,
+    max_index_q16: i32,
+    index_increment_q16: i32,
+) -> usize {
+    #[cfg(all(target_arch = "aarch64", feature = "neon2"))]
+    {
+        crate::neon2::silk_fir12_interpolate_neon(buf, out, out_ptr, max_index_q16, index_increment_q16)
+    }
+    #[cfg(not(all(target_arch = "aarch64", feature = "neon2")))]
+    {
+        fir12_interpolate_scalar(buf, out, out_ptr, max_index_q16, index_increment_q16)
+    }
+}
+
 /// Resolve coefficient table from enum.
 fn get_down_fir_coefs(c: ResamplerCoefs) -> &'static [i16] {
     use crate::silk::tables::*;
@@ -2043,7 +2131,7 @@ fn get_down_fir_coefs(c: ResamplerCoefs) -> &'static [i16] {
 
 /// silk_SMULWB: (a32 * (i16)b) >> 16, using 64-bit intermediate.
 #[inline(always)]
-fn smulwb(a: i32, b: i16) -> i32 {
+pub(crate) fn smulwb(a: i32, b: i16) -> i32 {
     ((a as i64 * b as i64) >> 16) as i32
 }
 
@@ -2266,7 +2354,7 @@ fn silk_resampler_private_iir_fir(
         last_n_samples_in = n_samples_in;
 
         // Upsample 2x using allpass
-        silk_resampler_private_up2_hq(
+        up2_hq(
             &mut s.s_iir,
             &mut buf[RESAMPLER_ORDER_FIR_12..],
             &input[in_ptr..in_ptr + n_samples_in],
@@ -2276,38 +2364,7 @@ fn silk_resampler_private_iir_fir(
         let max_index_q16 = (n_samples_in as i32) << (16 + 1); // +1 for 2x upsampling
 
         // FIR interpolation on i16 buffer
-        let mut index_q16 = 0i32;
-        while index_q16 < max_index_q16 {
-            let table_index = smulwb(index_q16 & 0xFFFF, 12) as usize;
-            let buf_idx = (index_q16 >> 16) as usize;
-
-            // The iCDF walk stays below 2*n_samples_in and n_samples_in
-            // <= batch_size, so buf_idx+7 is always inside `buf`. Unsafe
-            // reads remove the per-tap bounds checks while preserving the
-            // C reference's unchecked table access.
-            let mut res_q15 =
-                (uc!(buf, buf_idx) as i32) * (SILK_RESAMPLER_FRAC_FIR_12[table_index][0] as i32);
-            res_q15 += (uc!(buf, buf_idx + 1) as i32)
-                * (SILK_RESAMPLER_FRAC_FIR_12[table_index][1] as i32);
-            res_q15 += (uc!(buf, buf_idx + 2) as i32)
-                * (SILK_RESAMPLER_FRAC_FIR_12[table_index][2] as i32);
-            res_q15 += (uc!(buf, buf_idx + 3) as i32)
-                * (SILK_RESAMPLER_FRAC_FIR_12[table_index][3] as i32);
-            res_q15 += (uc!(buf, buf_idx + 4) as i32)
-                * (SILK_RESAMPLER_FRAC_FIR_12[11 - table_index][3] as i32);
-            res_q15 += (uc!(buf, buf_idx + 5) as i32)
-                * (SILK_RESAMPLER_FRAC_FIR_12[11 - table_index][2] as i32);
-            res_q15 += (uc!(buf, buf_idx + 6) as i32)
-                * (SILK_RESAMPLER_FRAC_FIR_12[11 - table_index][1] as i32);
-            res_q15 += (uc!(buf, buf_idx + 7) as i32)
-                * (SILK_RESAMPLER_FRAC_FIR_12[11 - table_index][0] as i32);
-
-            if out_ptr < out.len() {
-                out[out_ptr] = sat16(silk_rshift_round(res_q15, 15));
-            }
-            out_ptr += 1;
-            index_q16 += index_increment_q16;
-        }
+        out_ptr = fir12_interpolate(buf, out, out_ptr, max_index_q16, index_increment_q16);
 
         in_ptr += n_samples_in;
         remaining -= n_samples_in as i32;
@@ -2369,9 +2426,9 @@ pub fn silk_resampler(s: &mut SilkResamplerState, out: &mut [i16], input: &[i16]
     if s.resampler_function == USE_SILK_RESAMPLER_UP2_HQ {
         let delay_len = fs_in.min(s.delay_buf.len());
         let delay_copy: Vec<i16> = s.delay_buf[..delay_len].to_vec();
-        silk_resampler_private_up2_hq(&mut s.s_iir, out, &delay_copy, delay_len);
+        up2_hq(&mut s.s_iir, out, &delay_copy, delay_len);
         if in_len > fs_in {
-            silk_resampler_private_up2_hq(
+            up2_hq(
                 &mut s.s_iir,
                 &mut out[fs_out..],
                 &input[n_samples..],
